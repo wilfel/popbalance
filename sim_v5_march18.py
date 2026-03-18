@@ -12,15 +12,16 @@ from matplotlib.ticker import ScalarFormatter
 
 # --- Define values ---
 d_min = 1           # minimum diameter plotted (nm)
-d_max = 8000        # maximum diameter plotted (nm)
-N_bins = 100         # number of bins to create
+d_max = 4000        # maximum diameter plotted (nm)
+N_bins = 150         # number of bins to create
 dt = 0.00000001           # length of one time step in simulation (s)
-total_time = 0.002   # total simulation time (s)
+total_time = 0.003   # total simulation time (s)
 plot_interval_seconds = 0.00001       # interval to plot (time length between screenshots plotted)
 plot_interval = int(plot_interval_seconds / dt) # plot interval in terms of time steps
 init_total_num = 1e9    # total number of particles initially
-init_mean = 650     # initial geometric mean diameter of droplets (nm)
-init_sd = 2.5       # initial geometric standard deviation of the lognormal dist (nm)
+#init_mean = 630
+init_mean = 825  # initial geometric mean diameter of droplets (nm)
+init_sd = 1.68       # initial geometric standard deviation of the lognormal dist (nm)
 
 #init_mean = 2000         # initial geometric mean diameter of droplets (nm)
 #init_sd = 2.5           # initial geometric standard deviation of the lognormal dist (nm)
@@ -47,7 +48,7 @@ class SizeGrid:
         self.widths = self.edges[1:] - self.edges[:-1]  # length of each bin (nm)
         self.n_bins = n_bins    # number of bins
         self.n_steps = int(total_time / dt) # number of time steps
-        self.delta_log_d = np.log10(self.edges[1]) - np.log10(self.edges[0])    # width of each bin in log space
+        self.delta_log_d = np.log(self.edges[1]) - np.log(self.edges[0])    # width of each bin in log space
     
     def init_lognormal(self, N0, d_g, sigma_g):
         """
@@ -133,6 +134,9 @@ class Population:
         rho_mix[mask] = self.m[mask] / (self.m_solute[mask]/rho_solute + self.m_water[mask]/rho_water)
         self.V = self.m / rho_mix
         self.d_dist = (self.V * 6/np.pi)**(1/3)
+    
+    def get_summary_stats(self):
+        pass
             
 class GasPhase:
     """
@@ -313,6 +317,9 @@ gas_history = []
 time_history = []
 dist_history =[]
 
+d_wet_cmd = wet_pop.d_dist[np.searchsorted(
+    np.cumsum(wet_pop.N_dist), np.sum(wet_pop.N_dist) * 0.50)]
+
 for step in range(grid.n_steps):
     drying.advance(wet_pop, dry_pop, gas, dt)
     total = wet_pop.N_dist.sum()
@@ -332,7 +339,13 @@ for step in range(grid.n_steps):
             print(f"{b:>5} {grid.centers[b]:>12.1f} {wet_pop.N_dist[b]:>12.3e} "
                   f"{wet_pop.m_water[b]:>15.3e} {wet_pop.x_solute[b]:>10.4f}")
 
-
+dry_pop.get_summary_stats()
+d_dry_cmd = dry_pop.d_dist[np.searchsorted(
+    np.cumsum(dry_pop.N_dist), np.sum(dry_pop.N_dist) * 0.50)]
+print(f"Wet CMD: {d_wet_cmd*1e9:.1f} nm")
+print(f"Dry CMD : {d_dry_cmd*1e9:.1f} nm")
+print(f"Shrinkage factor : {d_dry_cmd/d_wet_cmd:.4f}")
+print(f"Solute vol frac  : {(d_dry_cmd/d_wet_cmd)**3:.5f}")
 # --- Animation ---
 fig, ax = plt.subplots()
 
