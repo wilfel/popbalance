@@ -1,0 +1,367 @@
+# what is the absolute smallest the dry particles could be? mass / density
+# when it hits solubility limit; find different evaporating rate
+# define void fraction of the particle; how close to full density does the particle get. Maybe particle density / solute density?
+# maybe track total water over time. even tho diameter doesn't change past solubility limit it still loses water, doesn't matter a ton but useful
+# track drying RH by just syaig zeolite air is in 0% RH?
+
+# EDH: Empirical not theromdynamic??? When surrounding humidity reaches a certain point, get particle to start to form (step function)
+# Efflorescence Droplet Humidity 
+# Needs some time to form something; humidity around droplet and condition in droplet
+# Try Github?
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from matplotlib.ticker import ScalarFormatter
+
+# --- Define values ---
+d_min = 1           # minimum diameter plotted (nm)
+d_max = 8000        # maximum diameter plotted (nm)
+N_bins = 100         # number of bins to create
+dt = 0.00001           # length of one time step in simulation (s)
+total_time = 0.01   # total simulation time (s)
+plot_interval_seconds = 0.0001       # interval to plot (time length between screenshots plotted)
+plot_interval = int(plot_interval_seconds / dt) # plot interval in terms of time steps
+init_total_num = 1e9    # total number of particles initially
+"""
+init_mean = 2000         # initial geometric mean diameter of droplets (nm)
+init_sd = 2.5           # initial geometric standard deviation of the lognormal dist (nm)
+"""
+init_mean = 650
+init_sd = 2.5
+
+# --- Classes ---
+class SizeGrid:
+    def __init__(self, d_min, d_max, n_bins, dt, total_time):
+        self.edges = np.logspace(np.log10(d_min), np.log10(d_max), n_bins + 1)  # edges of each size bin (nm)
+        self.centers = np.sqrt(self.edges[:-1] * self.edges[1:])    # center diameter of each bin (nm)
+        self.widths = self.edges[1:] - self.edges[:-1]  # length of each bin (nm)
+        self.n_bins = n_bins    # number of bins
+        self.n_steps = int(total_time / dt) # number of time steps
+        self.delta_log_d = np.log10(self.edges[1]) - np.log10(self.edges[0])
+    
+    def init_lognormal(self, N0, d_g, sigma_g):
+        return (N0 /
+                (self.centers * np.sqrt(2*np.pi) * np.log(sigma_g)) *
+                np.exp(-(np.log(self.centers / d_g))**2 /
+                    (2 * (np.log(sigma_g))**2)))
+
+class Population:
+    def __init__(self, grid, n_density_initial, wet):
+        self.grid = grid    
+        self.wet = True # wet or dry
+        self.n_density = n_density_initial
+        self.N0 = n_density_initial * grid.widths   # initial total number in each bin
+        
+        if wet:
+            self.N = np.zeros((grid.n_bins, grid.n_bins))   # N[current_bin, origin_bin] 
+            for j in range(grid.n_bins):
+                self.N[j, j] = self.N0[j]   # current and initial bin ID initialized equal
+            self.calc_dry_size()
+            self.init_composition()
+            self.conc_SA_liq = 0.75     # kg/m^3
+            self.conc_AS_liq = 0.25     # kg/m^3
+            self.mass_SA_liq = ((grid.centers*1E-9)**3 * np.pi /6) * self.conc_SA_liq * 1000   # g
+        else:
+            self.N = self.N0
+            self.dry_size = None
+
+    def calc_dry_size(self):
+        d_o = self.grid.centers     # initial diameter center of each bin
+        x_max_sa = 83 / (1000 + 83)     # max weight frac. of SA based on solubility limit (83g/L = 83g/1000L)
+        x_solute_dry = x_max_sa / 0.75  # max weight frac. of solute assuming 75% SA
+        x_solute_o = 0.001  # initial solute concentration is 1 g/L = 1g/1000g
+        #self.dry_size = d_o * (x_solute_o / x_solute_dry) ** (1 / 3)    # proportionality relationship double check this
+        self.dry_size = (d_o * (1000*x_solute_o/1600)**(1/3))  # actually 1600 just changed for pure AS for now
+    
+    def init_composition(self, x_solute_o=0.001, rho_water=1000):
+        d = self.grid.centers * 1e-9
+        V = np.pi/6 * d**3
+        m_total = rho_water * V
+        self.m_solute = x_solute_o * m_total
+        self.m_water = (1 - x_solute_o) * m_total
+
+    def summary_statistics(self):
+        """
+        Calculate and store summary statistics of current size distribution.
+        """
+        pass
+
+class GasPhase:
+    def __init__(self):
+        self.conc_SA_gas = 0    # concentration in kg/m^3
+        self.mass_SA_gas = 0
+        self.conc_AS_gas = 0   # concentration in kg/m^3, I think this will effectively stay 0
+        
+class DryingModel:
+    def __init__(self):
+            pass
+    
+    def wet_mass_loss(self, d_nm):
+        d= d_nm * 1E-9     # convert diameters of droplets to m
+        A_d = 4*np.pi*(d/2)**2 # surface area of droplet, m^2
+        rho_g = 2.416 # density of air at P = 30 PSI, T = 25 C, kg/m^3
+        #Tg = 298.15 # temperature of the gas, K (assume 25 C)
+        #Dv = 1.175E-9 * (Tg)**(1.75)/(rho_g)    # mass diffusion coeff of vapor in gas, m^2/s
+        Dv = 1.2E-5
+        mu_g = 18.37E-6       # viscosity of air in Pa*s
+        RH_sat = 1      # assume air immediately above droplet is fully saturated
+        RH_bulk = 0.3
+        P_sat = 0.0313 # saturated vapor pressure of water at 25 C is 0.0313 atm
+        P_tot = 2.04138 # total pressure in atm; 30 PSI
+        y_sat = RH_sat*P_sat*18.016/(RH_sat*P_sat*18.016+(P_tot-RH_sat*P_sat)*28.97)
+        y_bulk = RH_bulk*P_sat*18.016/(RH_bulk*P_sat*18.016+(P_tot-RH_bulk*P_sat)*28.97)
+        v_g = 0.63662 # velocity of gas, m/s
+        Re = rho_g * v_g * d / mu_g # reynolds number
+        Sc = mu_g/(rho_g * Dv)  # schmidt number
+        Sh = 2 + 0.552*Re**(1/2)*Sc**(1/3)  # sherwood number
+        dm_dt = -(A_d*rho_g*Dv*(y_sat-y_bulk)*Sh)/d  # mass loss rate in
+        return(dm_dt)
+
+    def wet_SA_mass_loss(self, d_nm):
+        d_m = d_nm * 1E-9
+        T = 298.15      # K
+        R = 8.314   # J/molK
+        M_sa = 0.11809 #kg/mol
+        M_w = 0.01806   # kg/mol
+        A_d = 4*np.pi*(d_m/2)**2 # surface area of droplet, m^2
+        gamma_SA = 1        # activity coefficient = 1 for now
+        p_sat_SA = 2.55E-5      # Pa
+        molefrac_SA_liq = (wet_pop.conc_SA_liq/M_sa) / ((wet_pop.conc_SA_liq/M_sa) + ((1000 - wet_pop.conc_SA_liq)/M_w))
+        p_SA_surface = molefrac_SA_liq * gamma_SA * p_sat_SA
+        p_SA_bulk = (gas.conc_SA_gas * R * T)/M_sa
+        rho_g = 2.416 # density of air at P = 30 PSI, T = 25 C, kg/m^3
+        mu_g = 18.37E-6       # viscosity of air in Pa*s
+        D_SA = 2E-6         # check this value later
+        v_g = 0.63662 # velocity of gas, m/s
+        Re_SA = rho_g * v_g * d_m / mu_g
+        Sc_SA = mu_g/(rho_g * D_SA)
+        Sh_SA = 2 + 0.552*Re_SA**(1/2)*Sc_SA**(1/3)
+        k_mass = Sh_SA * D_SA / d_m
+        C_SA_surface = p_SA_surface * M_sa / (R * T)
+        C_SA_bulk    = p_SA_bulk    * M_sa / (R * T)
+        dm_SA_dt = k_mass * A_d * (C_SA_surface-C_SA_bulk)  # kg/s
+        return dm_SA_dt
+    
+    def dry_SA_condensation(self, gas):
+        d_dry = dry_pop.grid.centers * 1E-9
+        T = 298.15      # K
+        R = 8.314   # J/molK
+        N = 1e9    # total number of particles initially
+        M_sa = 0.11809 #kg/mol
+        M_w = 0.01806   # kg/mol
+        D_SA = 2E-6         # check this value later
+        n_density = 1E15    # check this idk
+        vol = N / n_density
+        gas.conc_SA_gas = gas.mass_SA_gas / vol
+        
+        gamma_SA = 1        # activity coefficient = 1 for now
+        p_sat_SA = 2.55E-5      # Pa
+        molefrac_SA_liq = (wet_pop.conc_SA_liq/M_sa) / ((wet_pop.conc_SA_liq/M_sa) + ((1000 - wet_pop.conc_SA_liq)/M_w))
+        p_SA_surface = molefrac_SA_liq * gamma_SA * p_sat_SA
+        p_SA_bulk = (gas.conc_SA_gas * R * T)/M_sa
+        C_SA_surface = p_SA_surface * M_sa / (R * T)
+        C_SA_bulk    = p_SA_bulk    * M_sa / (R * T)
+
+        alpha_sa = 1    # source says accom coeff for SA should be about unity
+        vmolec_SA = (8 * R * T / (np.pi * M_sa))**(1/2)
+        lambda_sa = 3 * D_SA / vmolec_SA
+        Kn_sa = 2 * lambda_sa / d_dry
+        rho_sa = 1560 # kg/m^3
+        dd_DRY_dt = 1/d_dry * (4 * D_SA  / rho_sa) * 0.75*alpha_sa*(1+Kn_sa)/(1 + Kn_sa**2 + Kn_sa + 0.283 * Kn_sa * alpha_sa + 0.75*alpha_sa) * (C_SA_bulk - C_SA_surface)        
+        return dd_DRY_dt
+    
+    def advance(self, wet_pop, dry_pop, gas, dt):       # split this by wet and dry??
+        # this function is run each time step
+        rho_water = 1000    # density in kg/m^3
+        d = wet_pop.grid.centers        # diameters of wet population (nm)
+        d_m = d * 1E-9
+        widths = wet_pop.grid.widths    # width of each bin size
+        
+
+        
+        dm_dt = self.wet_mass_loss(d)      #Evaporation-driven droplet drying using mass transfer equation
+        #dm_dt = self.hertz_knudsen_massloss(d)     # Don't use this one
+
+        dd_dt = (2/(np.pi*rho_water*(d_m)**2))*dm_dt  # diameter change rate in m/s
+        
+        #print(np.min(dd_dt), np.max(dd_dt))
+        #print(np.max(abs(dd_dt)*1e9*dt))
+        #print(np.min(widths))
+        
+        N_old = wet_pop.N.copy()        # saves initial numbers in each bin as N_old
+        N_new = np.zeros_like(N_old)    # initialize new as array of zeros
+
+        for j0 in range(wet_pop.grid.n_bins):  # iterate over original wet bin sizes
+            d_dry = wet_pop.dry_size[j0]    # save corresponding dry size
+
+            for i in range(wet_pop.grid.n_bins):  # iterate over current wet bin sizes
+                Nij = N_old[i, j0]  # initial number in a specific bin along with its original bin size
+                
+                if Nij == 0:    # pass if bin is empty
+                    continue
+                d_exit = d[i] + dd_dt[i] *1E9 * dt   # calculate new size in this step
+
+                if d_exit <= d_dry: # fully dry particles
+                    # 1. Find the index of the bin that actually matches the dry size
+                    # We use the grid edges to find where d_dry fits
+                    dry_bin_index = np.searchsorted(wet_pop.grid.edges, d_dry) - 1
+                    dry_bin_index = np.clip(dry_bin_index, 0, wet_pop.grid.n_bins - 1)
+                    
+                    # 2. Add the particles to THAT bin in the dry population
+                    dry_pop.N[dry_bin_index] += Nij
+                    #dry_pop.N[j0] += Nij    # add particles to the dry population
+                    # dried particles are 'subtracted' from the wet population by simply not adding them to the new
+                    continue
+                else:
+                    # destination bin
+                    h = np.searchsorted(d, d_exit) - 1  # find where to insert d_exit to keep d sorted; -1 to put bin just below
+                    h = np.clip(h, 0, len(d) - 1)   # limit to length of array
+
+                    frac = min(1.0, abs(dd_dt[i] *1E9 * dt) / widths[i]) # what fraction of particles leave during this timestep
+                        # divide delta d by bin width to determine how many leaves (ex. delta d = 0.2*width = 20% leave)
+
+                    N_new[i, j0] += Nij * (1 - frac)    # particles that stay
+                    N_new[h, j0] += Nij * frac          # particles that leave
+        wet_pop.N[:] = N_new    # update array
+
+        dm_SA_dt = self.wet_SA_mass_loss(d)
+        #dm_SA_dt_total = dm_SA_dt * N_bin
+        
+        N_bin = wet_pop.N.sum(axis=1) #sum across origin bins → total particles in each current size bin
+        total_loss = dm_SA_dt * N_bin
+        wet_pop.mass_SA_liq = wet_pop.mass_SA_liq - total_loss * dt  # kg CHECK THIS????        
+        wet_pop.conc_SA_liq = (wet_pop.mass_SA_liq / ((d_m)**3 * np.pi /6))   # 1 g/l = 1 kg/m^3
+        gas.mass_SA_gas += np.sum(dm_SA_dt*N_bin) * dt    # kg
+        d_dry = dry_pop.grid.centers * 1E-9
+        
+        N_old_dry = dry_pop.N.copy()
+        N_new_dry = np.zeros_like(N_old_dry)
+        widths_dry = dry_pop.grid.widths   # nm
+        dd_DRY_dt = self.dry_SA_condensation(gas) # m/s
+        for i in range(dry_pop.grid.n_bins):
+
+                    Nij = N_old_dry[i]
+                    if Nij == 0:
+                        continue
+
+                    d_new = d_dry[i] + dd_DRY_dt[i]*1E9 * dt
+
+                    # Prevent negative or unphysical shrinkage below original dry core
+                    d_new = max(d_new, d_dry[i])
+
+                    # Find destination bin
+                    h = np.searchsorted(d_dry, d_new) - 1
+                    h = np.clip(h, 0, dry_pop.grid.n_bins - 1)
+
+                    frac = min(1.0, abs(dd_DRY_dt[i]*1E9 * dt) / widths_dry[i])
+
+                    N_new_dry[i] += Nij * (1 - frac)
+                    N_new_dry[h] += Nij * frac
+
+        dry_pop.N[:] = N_new_dry
+        
+# --- Set up Grid ---
+grid = SizeGrid(d_min, d_max, N_bins, dt, total_time)
+n_density_initial = grid.init_lognormal(init_total_num, init_mean, init_sd)
+
+# --- Set up Populations ---
+wet_pop = Population(grid, n_density_initial, wet=True)
+dry_pop = Population(grid, np.zeros_like(n_density_initial), wet=False)
+gas = GasPhase()
+
+# This does some weird math to make sure the initial total number of particles is actually what its set as
+# initialize cohorts on diagonal
+N0 = n_density_initial * grid.widths
+N0 *= init_total_num / np.sum(N0)
+
+for j in range(grid.n_bins):
+    wet_pop.N[j, j] = N0[j]
+
+
+# below this is all AI
+# --- Drying model ---
+drying = DryingModel()
+
+# --- Precompute time evolution ---
+wet_history = []
+dry_history = []
+gas_history = []
+time_history = []
+
+for step in range(grid.n_steps):
+    drying.advance(wet_pop, dry_pop, gas, dt)
+    if step % plot_interval == 0:
+        wet_history.append(wet_pop.N.sum(axis=1).copy())
+        dry_history.append(dry_pop.N.copy())
+
+        gas_history.append(gas.conc_SA_gas)   # store gas concentration
+        time_history.append(step * dt)
+
+
+# --- Animation ---
+fig, ax = plt.subplots()
+
+bars_wet = ax.bar(
+    grid.edges[:-1],
+    wet_history[0] / grid.delta_log_d,
+    width=grid.widths,
+    align="edge",
+    edgecolor="black",
+    linewidth=0.8,
+    label="Wet"
+)
+
+bars_dry = ax.bar(
+    grid.edges[:-1],
+    dry_history[0] / grid.delta_log_d,
+    width=grid.widths,
+    align="edge",
+    edgecolor="red",
+    linewidth=0.8,
+    alpha=0.6,
+    label="Dry"
+)
+
+ax.set_xscale("log")
+ax.set_xlabel("Particle diameter [nm]")
+ax.set_ylabel("Number density [#/cm³]")
+ax.set_xlim(d_min, d_max)
+ax.legend()
+
+ax.xaxis.set_major_formatter(ScalarFormatter())
+ax.ticklabel_format(axis="x", style="plain")
+def update(frame):
+    wet_vals = wet_history[frame] / grid.delta_log_d
+    dry_vals = dry_history[frame] / grid.delta_log_d
+    for bar, h in zip(bars_wet, wet_vals):
+        bar.set_height(h)
+
+    for bar, h in zip(bars_dry, dry_vals):
+        bar.set_height(h)
+
+    t = frame * plot_interval_seconds
+    ax.set_title(f"Simulated Drying of 1 g/L 25 AS:75 SA Droplets (t = {t:.4f} s)")
+    return (*bars_wet, *bars_dry)
+
+ani = FuncAnimation(
+    fig,
+    update,
+    frames=len(wet_history),
+    interval=150,
+    blit=False
+)
+
+plt.show()
+
+plt.figure()
+
+plt.plot(time_history, gas_history)
+
+plt.xlabel("Time (s)")
+plt.ylabel("SA Gas Concentration (kg/m³)")
+plt.title("Succinic Acid Gas Concentration vs Time")
+
+plt.grid(True)
+
+plt.show()

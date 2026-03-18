@@ -1,0 +1,187 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from matplotlib.ticker import ScalarFormatter
+
+# --- Classes ---
+class SizeGrid:
+    def __init__(self, d_min, d_max, n_bins, dt, total_time):
+        self.edges = np.logspace(np.log10(d_min), np.log10(d_max), n_bins + 1)
+        self.centers = np.sqrt(self.edges[:-1] * self.edges[1:])
+        self.widths = self.edges[1:] - self.edges[:-1]
+        self.n_bins = n_bins
+        self.n_steps = int(total_time / dt)
+
+class Population:
+    def __init__(self, grid, n_density_initial, cohort):
+        self.grid = grid
+        self.cohort = cohort
+
+        if cohort:
+            # N[current_bin, origin_bin]
+            self.N = np.zeros((grid.n_bins, grid.n_bins))
+        else:
+            self.n_density = n_density_initial
+            self.N = self.n_density * grid.widths
+
+        self.dry_size = None
+
+    def calc_dry_size(self):
+        d_o = self.grid.centers
+        x_max_sa = 83 / (1000 + 83)
+        x_solute_dry = x_max_sa / 0.75
+        x_solute_o = 0.001
+        self.dry_size = d_o * (x_solute_o / x_solute_dry) ** (1 / 3)
+
+class DryingModel:
+    def __init__(self, K):
+        self.K = K  # evaporation constant (nm^2 / s)
+
+    def advance(self, wet_pop, dry_pop, dt):
+        d = wet_pop.grid.centers
+        widths = wet_pop.grid.widths
+
+        dd_dt = -self.K / (2 * d)
+
+        N_old = wet_pop.N.copy()
+        N_new = np.zeros_like(N_old)
+
+        for j0 in range(wet_pop.grid.n_bins):  # origin bin
+            d_dry = wet_pop.dry_size[j0]
+
+            for i in range(wet_pop.grid.n_bins):  # current bin
+                Nij = N_old[i, j0]
+                if Nij == 0:
+                    continue
+
+                d_exit = d[i] + dd_dt[i] * dt
+
+                # fully dried
+                if d_exit <= d_dry:
+                    dry_pop.N[j0] += Nij
+                    continue
+
+                # destination bin
+                j = np.searchsorted(d, d_exit) - 1
+                j = np.clip(j, 0, len(d) - 1)
+
+                frac = min(1.0, abs(dd_dt[i] * dt) / widths[i])
+
+                N_new[i, j0] += Nij * (1 - frac)
+                N_new[j, j0] += Nij * frac
+
+        wet_pop.N[:] = N_new
+
+# --- Function ---
+def init_lognormal(centers, N0, d_g, sigma_g):
+    return (N0 /
+            (centers * np.sqrt(2*np.pi) * np.log(sigma_g)) *
+            np.exp(-(np.log(centers / d_g))**2 /
+                   (2 * (np.log(sigma_g))**2)))
+
+# --- Define values ---
+d_min = 1
+d_max = 2500
+N_bins = 50
+dt = 0.01
+total_time = 100
+
+grid = SizeGrid(d_min, d_max, N_bins, dt, total_time)
+
+plot_interval_seconds = 2
+plot_interval = int(plot_interval_seconds / dt)
+
+init_total_num = 1e9
+init_mean = 300
+init_sd = 1.8
+
+n_density_initial = init_lognormal(
+    grid.centers,
+    init_total_num,
+    init_mean,
+    init_sd
+)
+
+# --- Initialize populations ---
+wet_pop = Population(grid, n_density_initial, cohort=True)
+dry_pop = Population(grid, np.zeros_like(n_density_initial), cohort=False)
+
+# initialize cohorts on diagonal
+N0 = n_density_initial * grid.widths
+N0 *= init_total_num / np.sum(N0)
+
+for j in range(grid.n_bins):
+    wet_pop.N[j, j] = N0[j]
+
+wet_pop.calc_dry_size()
+
+# --- Drying model ---
+drying = DryingModel(K=200.0)
+
+# --- Precompute time evolution ---
+wet_history = []
+dry_history = []
+
+for step in range(grid.n_steps):
+    drying.advance(wet_pop, dry_pop, dt)
+
+    if step % plot_interval == 0:
+        wet_history.append(wet_pop.N.sum(axis=1).copy())
+        dry_history.append(dry_pop.N.copy())
+
+# --- Animation ---
+fig, ax = plt.subplots()
+
+bars_wet = ax.bar(
+    grid.edges[:-1],
+    wet_history[0] / grid.widths,
+    width=grid.widths,
+    align="edge",
+    edgecolor="black",
+    linewidth=0.8,
+    label="Wet"
+)
+
+bars_dry = ax.bar(
+    grid.edges[:-1],
+    dry_history[0] / grid.widths,
+    width=grid.widths,
+    align="edge",
+    edgecolor="red",
+    linewidth=0.8,
+    alpha=0.6,
+    label="Dry"
+)
+
+ax.set_xscale("log")
+ax.set_xlabel("Particle diameter [nm]")
+ax.set_ylabel("Number density [#/cm³/nm]")
+ax.set_xlim(d_min, d_max)
+ax.legend()
+
+ax.xaxis.set_major_formatter(ScalarFormatter())
+ax.ticklabel_format(axis="x", style="plain")
+
+def update(frame):
+    wet_vals = wet_history[frame] / grid.widths
+    dry_vals = dry_history[frame] / grid.widths
+
+    for bar, h in zip(bars_wet, wet_vals):
+        bar.set_height(h)
+
+    for bar, h in zip(bars_dry, dry_vals):
+        bar.set_height(h)
+
+    t = frame * plot_interval_seconds
+    ax.set_title(f"Evolving droplet size distribution (t = {t:.1f} s)")
+    return (*bars_wet, *bars_dry)
+
+ani = FuncAnimation(
+    fig,
+    update,
+    frames=len(wet_history),
+    interval=150,
+    blit=False
+)
+
+plt.show()
