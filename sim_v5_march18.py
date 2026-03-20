@@ -174,8 +174,12 @@ class GasPhase:
         self.conc_AS_gas = 0   # concentration in kg/m^3, I think this will effectively stay 0
         
     def gas_update(self,dm_SA_dt,dm_cond_dt, dt):
-        self.mass_SA_gas += float(np.sum(-dm_SA_dt * dt))
-        self.mass_SA_gas += float(np.sum(-dm_cond_dt*dt))
+        # SA evaporated from wet particles (positive contribution to gas)
+        self.mass_SA_gas += -np.sum(dm_SA_dt * dt)  # dm_SA_dt is negative for evaporation
+
+        # SA condensed onto dry particles (negative contribution to gas) 
+        self.mass_SA_gas += -np.sum(dm_cond_dt * dt)  # dm_cond_dt is positive for condensation
+
 
 class DryingModel:
     def __init__(self):
@@ -339,10 +343,22 @@ class DryingModel:
         alpha_sa = 1    # source says accom coeff for SA should be about unity
         vmolec_SA = (8 * R * T / (np.pi * M_sa))**(1/2)
         lambda_sa = 3 * D_SA / vmolec_SA
-        Kn_sa = 2 * lambda_sa / d_dry
+        Kn_sa = np.zeros_like(d_dry)
+        Kn_mask = d_dry > 0
+        Kn_sa[Kn_mask] = 2 * lambda_sa / d_dry[Kn_mask]
         rho_sa = 1560 # kg/m^3
-        dd_cond_dt = 1/d_dry * (4 * D_SA  / rho_sa) * 0.75*alpha_sa*(1+Kn_sa)/(1 + Kn_sa**2 + Kn_sa + 0.283 * Kn_sa * alpha_sa + 0.75*alpha_sa) * (C_SA_bulk - C_SA_surface)
-        dd_cond_dt[np.isnan(dd_cond_dt)] = 0
+        
+        # FIXED: Handle division by zero and NaN values
+        denominator = (1 + Kn_sa**2 + Kn_sa + 0.283 * Kn_sa * alpha_sa + 0.75*alpha_sa)
+        condensation_factor = np.where(
+            (d_dry > 0) & (denominator > 0),
+            (4 * D_SA / rho_sa) * 0.75*alpha_sa*(1+Kn_sa) / denominator,
+            0
+        )
+        
+        dd_cond_dt = (1/np.where(d_dry > 0, d_dry, 1)) * condensation_factor * (C_SA_bulk - C_SA_surface)
+        dd_cond_dt = np.where(d_dry > 0, dd_cond_dt, 0)  # Set to zero where d_dry is zero
+        
         dm_cond_dt = (np.pi * rho_sa * wet_pop.d_dist**2 / 2) * dd_cond_dt
         return dd_cond_dt, dm_cond_dt
     
