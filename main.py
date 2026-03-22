@@ -280,19 +280,31 @@ class DryingModel:
         gamma_SA = 1        # activity coefficient = 1 for now
         p_sat_SA = 2.55E-5      # Pa
         
+
         conc_SA_liq = wet_pop.x_solute * wet_pop.frac_SA * 1000
         molefrac_SA_liq = (conc_SA_liq/M_sa) / ((conc_SA_liq/M_sa) + ((1000 - conc_SA_liq)/M_w))
         p_SA_surface = molefrac_SA_liq * gamma_SA * p_sat_SA
         p_SA_bulk = (gas.conc_SA_gas * R * T)/M_sa
-        C_SA_surface = p_SA_surface * M_sa / (R * T)
+        C_SA_surface = np.zeros_like(d_dry)
+        C_SA_surface[not_empty_mask] = p_SA_surface[not_empty_mask] * M_sa / (R * T)
+
         C_SA_bulk    = p_SA_bulk    * M_sa / (R * T)
 
         alpha_sa = 1    # source says accom coeff for SA should be about unity
         vmolec_SA = (8 * R * T / (np.pi * M_sa))**(1/2)
         lambda_sa = 3 * D_SA / vmolec_SA
-        Kn_sa = 2 * lambda_sa / d_dry
+        
+        Kn_sa = np.zeros_like(d_dry)
+        
+        Kn_sa[not_empty_mask] = 2 * lambda_sa / d_dry[not_empty_mask]
         rho_sa = 1560 # kg/m^3
-        dd_cond_dt = 1/d_dry * (4 * D_SA  / rho_sa) * 0.75*alpha_sa*(1+Kn_sa)/(1 + Kn_sa**2 + Kn_sa + 0.283 * Kn_sa * alpha_sa + 0.75*alpha_sa) * (C_SA_bulk - C_SA_surface)
+        
+        
+        dd_cond_dt = np.zeros_like(d_dry)
+        dd_cond_dt[not_empty_mask] = (1/d_dry[not_empty_mask] * (4 * D_SA  / rho_sa) * 
+        0.75*alpha_sa*(1+Kn_sa[not_empty_mask])/(1 + Kn_sa[not_empty_mask]**2 + Kn_sa[not_empty_mask] 
+        + 0.283 * Kn_sa[not_empty_mask] * alpha_sa + 0.75*alpha_sa) * (C_SA_bulk - C_SA_surface[not_empty_mask]))
+        
         dd_cond_dt[np.isnan(dd_cond_dt)] = 0
         dm_cond_dt = (np.pi * rho_sa * wet_pop.d_dist**2 / 2) * dd_cond_dt
         return dd_cond_dt, dm_cond_dt
