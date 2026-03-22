@@ -14,7 +14,7 @@ from matplotlib.ticker import ScalarFormatter
 d_min = 1           # minimum diameter plotted (nm)
 d_max = 4000        # maximum diameter plotted (nm)
 N_bins = 150         # number of bins to create
-dt = 0.00000001           # length of one time step in simulation (s)
+dt = 0.0000001           # length of one time step in simulation (s)
 total_time = 0.001   # total simulation time (s)
 plot_interval_seconds = 0.00001       # interval to plot (time length between screenshots plotted)
 plot_interval = int(plot_interval_seconds / dt) # plot interval in terms of time steps
@@ -109,6 +109,10 @@ class Population:
         n = self.grid.n_bins
         self.m = np.zeros(n, dtype=float)  # float array with n elements
         self.V = np.zeros(n, dtype=float)  # float array with n elements
+        self.m_solute = np.zeros(n, dtype=float)  # float array with n elements
+        self.m_SA = np.zeros(n, dtype=float)  # float array with n elements
+        self.frac_AS = np.zeros(n, dtype=float)  # float array with n elements
+        self.frac_SA = np.zeros(n, dtype=float)  # float array with n elements
         
     def wet_update_diameter(self, dm_dt,dm_SA_dt, dt):
         """
@@ -121,10 +125,10 @@ class Population:
         Returns:
             None
         """
-
         self.m_water = np.maximum(self.m_water + dm_dt * dt, 0) # Ensure mass will not go negative
         self.m_solute = np.maximum(self.m_solute + dm_SA_dt * dt, 0) # Ensure mass will not go negative
         self.m_SA = np.maximum(self.m_SA + dm_SA_dt * dt, 0)
+        print(self.m_SA)
 
         self.m = self.m_solute + self.m_water
         self.x_solute = np.zeros_like(self.m)
@@ -135,13 +139,26 @@ class Population:
         rho_solute = 1613
         rho_mix = np.full_like(self.m, rho_water)
 
-        mask = self.m > 0
+        self.frac_SA = np.zeros_like(self.m_solute)
+        self.frac_AS = np.zeros_like(self.m_solute)
+        self.frac_SA[mask] = self.m_SA[mask] / self.m_solute[mask]
+        self.frac_AS[mask] = 1 - self.frac_SA[mask]
         rho_mix[mask] = self.m[mask] / (self.m_solute[mask]/rho_solute + self.m_water[mask]/rho_water)
         self.V = self.m / rho_mix
         self.d_dist = (self.V * 6/np.pi)**(1/3)
     
-    def dry_update_diameter(self, dm_SA_dt, dm_cond_dt, dt):
-        pass
+    def dry_update_diameter(self, dm_cond_dt, dt):
+        self.m_SA += dm_cond_dt * dt  
+        
+        total_solute_mass = self.m_SA  
+        self.m = total_solute_mass.copy()  
+        
+        mask = self.m > 1e-20
+        self.frac_SA[mask] = self.m_SA[mask] / self.m[mask]
+        self.frac_AS[mask] = 1 - self.frac_SA[mask]
+        
+        self.frac_SA[~mask] = 0.0
+        self.frac_AS[~mask] = 0.0
     
     def get_summary_stats(self):
         pass
@@ -199,10 +216,9 @@ class DryingModel:
                         Sh[mask]) / d[mask]        
         return(dm_dt)   # kg/s
     
-    def nucleation(self, wet_pop, dry_pop, dt):
+    def wet_to_dry(self, wet_pop, dry_pop, dt):
         C_sat_SA = 83   # kg/m^3 max concentration of SUCCINIC ACID
         C_SA_current = wet_pop.x_solute * wet_pop.frac_SA * 1000
-        wet_d_dist_old = wet_pop.d_dist.copy()
         # Create boolean masks to identify dried particles
         not_empty_mask = wet_pop.m > 0     # bins that actually contain particles
         no_water_mask = wet_pop.m_water <= 1e-25 #<= 1e-15    # particles already fully dry
@@ -232,12 +248,22 @@ class DryingModel:
             j = dry_bins[idx]
             dry_pop.N_dist[j] += N
             dry_pop.m[j] += wet_pop.m[idx]     # ADD THIS - move mass to correct bin
+            dry_pop.m_solute[j] += wet_pop.m_solute[idx]
+            dry_pop.m_SA[j]+= wet_pop.m_SA[idx]
 
+        nonempty = dry_pop.m_solute > 0
+        dry_pop.frac_SA[nonempty] = dry_pop.m_SA[nonempty] / dry_pop.m_solute[nonempty]
+        dry_pop.frac_AS[nonempty] = 1 - dry_pop.frac_SA[nonempty]
         wet_pop.N_dist[dry_mask] = 0
         wet_pop.m[dry_mask] = 0
+        wet_pop.m_solute[dry_mask] = 0
+        wet_pop.m_SA[dry_mask] = 0
         
     def wet_SA_massloss(self, wet_pop):
-        d_m = wet_pop.d_dist
+        not_empty_mask = wet_pop.N_dist > 0
+        d_m = np.zeros_like(wet_pop.d_dist)
+        d_m[not_empty_mask] = wet_pop.d_dist[not_empty_mask]
+
         T = 298.15      # K
         R = 8.314   # J/molK
         M_sa = 0.11809 # kg/mol
@@ -256,7 +282,8 @@ class DryingModel:
         Re_SA = rho_g * v_g * d_m / mu_g
         Sc_SA = mu_g/(rho_g * D_SA)
         Sh_SA = 2 + 0.552*Re_SA**(1/2)*Sc_SA**(1/3)
-        k_mass = Sh_SA * D_SA / d_m
+        k_mass = np.zeros_like(d_m)
+        k_mass[not_empty_mask] = Sh_SA[not_empty_mask] * D_SA / d_m[not_empty_mask]
         C_SA_surface = p_SA_surface * M_sa / (R * T)
         C_SA_bulk    = p_SA_bulk    * M_sa / (R * T)
         dm_SA_dt = -k_mass * A_d * (C_SA_surface-C_SA_bulk)  # kg/s
@@ -314,9 +341,9 @@ class DryingModel:
         dm_SA_dt = self.wet_SA_massloss(wet_pop)
         dd_cond_dt, dm_cond_dt = self.condensation(gas)
         wet_pop.wet_update_diameter(dm_dt, dm_SA_dt, dt)
-        dry_pop.dry_update_diameter(dm_SA_dt,dm_cond_dt,dt)
+        dry_pop.dry_update_diameter(dm_cond_dt,dt)
         gas.update_gas(dm_SA_dt, dm_cond_dt, wet_pop, dt)
-        self.nucleation(wet_pop, dry_pop, dt)
+        self.wet_to_dry(wet_pop, dry_pop, dt)
 
 # --- Set up Grid ---
 grid = SizeGrid(d_min, d_max, N_bins, dt, total_time)
@@ -351,15 +378,7 @@ for step in range(grid.n_steps):
         time_history.append(step * dt)
         
         dist_history.append(wet_pop.d_dist.copy())
-        """
-        # --- DEBUG: print m_water for monitored bins ---
-        t_ms = step * dt * 1000
-        print(f"\nt = {t_ms:.3f} ms")
-        print(f"{'Bin':>5} {'Center (nm)':>12} {'N_dist':>12} {'m_water (kg)':>15} {'x_solute':>10}")
-        for b in monitor_bins:
-            print(f"{b:>5} {grid.centers[b]:>12.1f} {wet_pop.N_dist[b]:>12.3e} "
-                  f"{wet_pop.m_water[b]:>15.3e} {wet_pop.x_solute[b]:>10.4f}")
-        """
+
 dry_pop.get_summary_stats()
 d_dry_cmd = dry_pop.d_dist[np.searchsorted(
     np.cumsum(dry_pop.N_dist), np.sum(dry_pop.N_dist) * 0.50)]
@@ -415,6 +434,8 @@ def update(frame):
     ax.set_title(f"Simulated Drying of 1 g/L 25 AS:75 SA Droplets (t = {t:.2f} ms)")
 
 ani = FuncAnimation(fig, update, frames=len(wet_history), interval=150, blit=False) # type: ignore
+
+print(dry_pop.frac_SA)
 plt.show()
 
 plt.figure()
