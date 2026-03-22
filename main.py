@@ -18,7 +18,7 @@ dt = 0.0000001           # length of one time step in simulation (s)
 total_time = 0.001   # total simulation time (s)
 plot_interval_seconds = 0.00001       # interval to plot (time length between screenshots plotted)
 plot_interval = int(plot_interval_seconds / dt) # plot interval in terms of time steps
-init_total_num = 1e9    # total number of particles initially
+init_total_num = 5.63e7    # total number of particles initially
 #init_mean = 630
 init_mean = 825  # initial geometric mean diameter of droplets (nm)
 init_sd = 1.68       # initial geometric standard deviation of the lognormal dist (nm)
@@ -128,7 +128,6 @@ class Population:
         self.m_water = np.maximum(self.m_water + dm_dt * dt, 0) # Ensure mass will not go negative
         self.m_solute = np.maximum(self.m_solute + dm_SA_dt * dt, 0) # Ensure mass will not go negative
         self.m_SA = np.maximum(self.m_SA + dm_SA_dt * dt, 0)
-        print(self.m_SA)
 
         self.m = self.m_solute + self.m_water
         self.x_solute = np.zeros_like(self.m)
@@ -148,18 +147,23 @@ class Population:
         self.d_dist = (self.V * 6/np.pi)**(1/3)
     
     def dry_update_diameter(self, dm_cond_dt, dt):
-        self.m_SA += dm_cond_dt * dt  
-        
-        total_solute_mass = self.m_SA  
-        self.m = total_solute_mass.copy()  
-        
-        mask = self.m > 1e-20
-        self.frac_SA[mask] = self.m_SA[mask] / self.m[mask]
+        self.m_SA += dm_cond_dt * dt        
+        self.m_solute += dm_cond_dt * dt    
+        self.m += dm_cond_dt * dt          
+               
+        mask = self.m > 0
+        self.frac_SA[mask] = self.m_SA[mask] / self.m_solute[mask]
         self.frac_AS[mask] = 1 - self.frac_SA[mask]
         
         self.frac_SA[~mask] = 0.0
         self.frac_AS[~mask] = 0.0
-    
+        rho_SA = 1560  # kg/m³
+        rho_AS = 1770  # kg/m³ 
+        rho_total = self.frac_SA * rho_SA + self.frac_AS * rho_AS
+        self.V[mask] = self.m_solute[mask] / rho_total[mask]
+        self.d_dist[mask] = (self.V[mask] * 6/np.pi)**(1/3)
+        
+
     def get_summary_stats(self):
         pass
             
@@ -181,6 +185,10 @@ class GasPhase:
     def update_gas(self, dm_SA_dt, dm_cond_dt, wet_pop, dt):
         pass
         gas.mass_SA_gas += -np.sum(dm_SA_dt*wet_pop.N_dist) * dt   # kg
+        N = 5.63e7    # total number of particles initially
+        n_density = 1E15    # check this idk
+        vol = N / n_density
+        gas.conc_SA_gas = gas.mass_SA_gas / vol
         
 
 class DryingModel:
@@ -247,7 +255,7 @@ class DryingModel:
 
             j = dry_bins[idx]
             dry_pop.N_dist[j] += N
-            dry_pop.m[j] += wet_pop.m[idx]     # ADD THIS - move mass to correct bin
+            dry_pop.m[j] += wet_pop.m[idx]
             dry_pop.m_solute[j] += wet_pop.m_solute[idx]
             dry_pop.m_SA[j]+= wet_pop.m_SA[idx]
 
@@ -296,13 +304,9 @@ class DryingModel:
         
         T = 298.15      # K
         R = 8.314   # J/molK
-        N = 1e9    # total number of particles initially
         M_sa = 0.11809 #kg/mol
         M_w = 0.01806   # kg/mol
         D_SA = 2E-6         # check this value later
-        n_density = 1E15    # check this idk
-        vol = N / n_density
-        gas.conc_SA_gas = gas.mass_SA_gas / vol
         
         gamma_SA = 1        # activity coefficient = 1 for now
         p_sat_SA = 2.55E-5      # Pa
@@ -436,6 +440,7 @@ def update(frame):
 ani = FuncAnimation(fig, update, frames=len(wet_history), interval=150, blit=False) # type: ignore
 
 print(dry_pop.frac_SA)
+print(dry_pop.frac_AS)
 plt.show()
 
 plt.figure()
