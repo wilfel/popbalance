@@ -98,17 +98,19 @@ class Population:
         self.frac_AS = np.full(n, 0.25)
         self.x_solute = np.full(n, 0.001)
         
+           
         rho_water = 1000
         self.m = rho_water * self.V   # total mass of particles
         self.m_solute = self.x_solute * self.m
         self.m_water = (1-self.x_solute) * self.m
+        self.m_SA = self.x_solute * self.m * self.frac_SA
 
     def dry_init(self):
         n = self.grid.n_bins
         self.m = np.zeros(n, dtype=float)  # float array with n elements
         self.V = np.zeros(n, dtype=float)  # float array with n elements
         
-    def wet_update_diameter(self, dm_dt, dt):
+    def wet_update_diameter(self, dm_dt,dm_SA_dt, dt):
         """
         Updates diameter and other variables associated with the wet population based on a mass loss rate.
 
@@ -121,6 +123,9 @@ class Population:
         """
 
         self.m_water = np.maximum(self.m_water + dm_dt * dt, 0) # Ensure mass will not go negative
+        self.m_solute = np.maximum(self.m_solute + dm_SA_dt * dt, 0) # Ensure mass will not go negative
+        self.m_SA = np.maximum(self.m_SA + dm_SA_dt * dt, 0)
+
         self.m = self.m_solute + self.m_water
         self.x_solute = np.zeros_like(self.m)
         mask = self.m > 0
@@ -135,10 +140,9 @@ class Population:
         self.V = self.m / rho_mix
         self.d_dist = (self.V * 6/np.pi)**(1/3)
     
-    def dry_update_diameter(self, dm_SA_dt, dt):
-        self.m = np.maximum(self.m + dm_SA_dt * dt, 0) # Ensure mass will not go negative
-        gas.mass_SA_gas += np.sum(dm_SA_dt*self.N_dist) * dt    # kg
-        
+    def dry_update_diameter(self, dm_SA_dt, dm_cond_dt, dt):
+        pass
+    
     def get_summary_stats(self):
         pass
             
@@ -156,6 +160,11 @@ class GasPhase:
         self.conc_SA_gas = 0    # concentration in kg/m^3
         self.mass_SA_gas = 0
         self.conc_AS_gas = 0   # concentration in kg/m^3, I think this will effectively stay 0
+    
+    def update_gas(self, dm_SA_dt, dm_cond_dt, wet_pop, dt):
+        pass
+        gas.mass_SA_gas += -np.sum(dm_SA_dt*wet_pop.N_dist) * dt   # kg
+        
 
 class DryingModel:
     def __init__(self):
@@ -250,7 +259,7 @@ class DryingModel:
         k_mass = Sh_SA * D_SA / d_m
         C_SA_surface = p_SA_surface * M_sa / (R * T)
         C_SA_bulk    = p_SA_bulk    * M_sa / (R * T)
-        dm_SA_dt = k_mass * A_d * (C_SA_surface-C_SA_bulk)  # kg/s
+        dm_SA_dt = -k_mass * A_d * (C_SA_surface-C_SA_bulk)  # kg/s
         return dm_SA_dt
     
     def condensation(self, gas):
@@ -292,8 +301,9 @@ class DryingModel:
         dm_dt = self.evaporate_water(wet_pop)
         dm_SA_dt = self.wet_SA_massloss(wet_pop)
         dd_cond_dt, dm_cond_dt = self.condensation(gas)
-        wet_pop.wet_update_diameter(dm_dt, dt)
-        dry_pop.dry_update_diameter(dm_SA_dt,dt)
+        wet_pop.wet_update_diameter(dm_dt, dm_SA_dt, dt)
+        dry_pop.dry_update_diameter(dm_SA_dt,dm_cond_dt,dt)
+        gas.update_gas(dm_SA_dt, dm_cond_dt, wet_pop, dt)
         self.nucleation(wet_pop, dry_pop, dt)
 
 # --- Set up Grid ---
@@ -329,7 +339,6 @@ for step in range(grid.n_steps):
         time_history.append(step * dt)
         
         dist_history.append(wet_pop.d_dist.copy())
-        print(wet_pop.d_dist)
         """
         # --- DEBUG: print m_water for monitored bins ---
         t_ms = step * dt * 1000
