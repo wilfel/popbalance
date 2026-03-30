@@ -15,7 +15,7 @@ d_min = 1           # minimum diameter plotted (nm)
 d_max = 4000        # maximum diameter plotted (nm)
 N_bins = 150         # number of bins to create
 dt = 0.0000001           # length of one time step in simulation (s)
-total_time = 0.001   # total simulation time (s)
+total_time = 0.005   # total simulation time (s)
 plot_interval_seconds = 0.00001       # interval to plot (time length between screenshots plotted)
 plot_interval = int(plot_interval_seconds / dt) # plot interval in terms of time steps
 init_total_num = 5.63e7    # total number of particles initially
@@ -179,15 +179,16 @@ class GasPhase:
     """
     def __init__(self):
         self.conc_SA_gas = 0    # concentration in kg/m^3
-        self.mass_SA_gas = 0
-        self.conc_AS_gas = 0   # concentration in kg/m^3, I think this will effectively stay 0
+        self.mass_SA_gas = 1e-11
+        self.conc_AS_gas = 0  # concentration in kg/m^3, I think this will effectively stay 0
     
     def update_gas(self, dm_SA_dt, dm_cond_dt, wet_pop, dt):
         pass
         gas.mass_SA_gas += -np.sum(dm_SA_dt*wet_pop.N_dist) * dt   # kg
-        N = 5.63e7    # total number of particles initially
-        n_density = 1E15    # check this idk
-        vol = N / n_density
+        #N = 5.63e7    # total number of particles initially
+        #n_density = 1E15    # check this idk
+        #vol = N / n_density
+        vol = 1E-6
         gas.conc_SA_gas = gas.mass_SA_gas / vol
         
 
@@ -201,10 +202,10 @@ class DryingModel:
         rho_g = 2.416 # density of air at P = 30 PSI, T = 25 C, kg/m^3
         #Tg = 298.15 # temperature of the gas, K (assume 25 C)
         #Dv = 1.175E-9 * (Tg)**(1.75)/(rho_g)    # mass diffusion coeff of vapor in gas, m^2/s
-        Dv = 1.2E-5
+        Dv = 2.12E-5
         mu_g = 18.37E-6       # viscosity of air in Pa*s
         RH_sat = 1      # assume air immediately above droplet is fully saturated
-        RH_bulk = 0.3
+        RH_bulk = 0.2
         P_sat = 0.0313 # saturated vapor pressure of water at 25 C is 0.0313 atm
         P_tot = 2.04138 # total pressure in atm; 30 PSI
         y_sat = RH_sat*P_sat*18.016/(RH_sat*P_sat*18.016+(P_tot-RH_sat*P_sat)*28.97)
@@ -278,14 +279,15 @@ class DryingModel:
         M_w = 0.01806   # kg/mol
         A_d = 4*np.pi*(d_m/2)**2 # surface area of droplet, m^2
         gamma_SA = 1        # activity coefficient = 1 for now
-        p_sat_SA = 2.55E-5      # Pa
+        p_sat_SA = 1.95E-3      # Pa
+        #C_sat_kgm3    = p_sat_SA    * M_sa / (R * T)
         conc_SA_liq = wet_pop.x_solute * wet_pop.frac_SA * 1000
         molefrac_SA_liq = (conc_SA_liq/M_sa) / ((conc_SA_liq/M_sa) + ((1000 - conc_SA_liq)/M_w))
         p_SA_surface = molefrac_SA_liq * gamma_SA * p_sat_SA
         p_SA_bulk = (gas.conc_SA_gas * R * T)/M_sa
         rho_g = 2.416 # density of air at P = 30 PSI, T = 25 C, kg/m^3
         mu_g = 18.37E-6       # viscosity of air in Pa*s
-        D_SA = 2E-6         # check this value later
+        D_SA = 9.52E-6         # check this value later
         v_g = 0.63662 # velocity of gas, m/s
         Re_SA = rho_g * v_g * d_m / mu_g
         Sc_SA = mu_g/(rho_g * D_SA)
@@ -295,6 +297,7 @@ class DryingModel:
         C_SA_surface = p_SA_surface * M_sa / (R * T)
         C_SA_bulk    = p_SA_bulk    * M_sa / (R * T)
         dm_SA_dt = -k_mass * A_d * (C_SA_surface-C_SA_bulk)  # kg/s
+        print(p_SA_bulk)
         return dm_SA_dt
     
     def condensation(self, gas):
@@ -339,7 +342,28 @@ class DryingModel:
         dd_cond_dt[np.isnan(dd_cond_dt)] = 0
         dm_cond_dt = (np.pi * rho_sa * wet_pop.d_dist**2 / 2) * dd_cond_dt
         return dd_cond_dt, dm_cond_dt
-    
+
+    def nucleation(self,dry_pop,gas):
+        T = 298.15  # Temp in K
+        kB = 1.380649E-23   # Boltzmann constant; m2 kg s-2 K-1
+        Na = 6.022E23       # Avogrados number
+        M_sa = 0.11809      # molar mass of succinic acid, kg/m^3
+        rho_SA_solid = 1560     # kg/m^3
+        R = 8.3145          # J/mol*K
+        rho_SA_vapor = gas.conc_SA_gas
+        rho_v = rho_SA_vapor * Na / M_sa   # Number density of vapor
+        rho_l = rho_SA_solid * Na / M_sa   # Number density of liquid (Solid)?
+        gamma_SA = 67.8 /1000   # surface tension (SFE) of succinic acid in N/m
+        m_molec = M_sa / Na     # Mass of 1 molecule of SA (kg)
+        P_v = rho_SA_vapor * R * T /M_sa
+        P_sat = 1.95E-3      # Saturation vapor pressure of SA in Pa
+        v1 = P_v / np.sqrt(2*np.pi*m_molec*kB*T)
+        S = P_v / P_sat
+        d_mu = kB * T * np.log(S)
+        Jo = (rho_v)**2/(rho_l) * np.sqrt(2*gamma_SA/(np.pi*m_molec))
+        dG_star = (16 * np.pi/3) * (v1)**2*gamma_SA**3/((d_mu)**2)
+        J = Jo * np.exp(-dG_star/(kB*T))   # nucleation rate; number of events per volume times time [#/m^3*s]
+
     def advance(self, wet_pop, dry_pop, gas, dt):
         dm_dt = self.evaporate_water(wet_pop)
         dm_SA_dt = self.wet_SA_massloss(wet_pop)
@@ -454,3 +478,92 @@ plt.title("Succinic Acid Gas Concentration vs Time")
 plt.grid(True)
 
 plt.show()
+
+# Plot fraction of SA vs diameter - simple bar plot
+plt.figure(figsize=(10, 6))
+
+# Get final state data
+final_frac_SA = dry_pop.frac_SA
+final_dry_N = dry_history[-1]  # Final dry particle distribution
+
+# Only plot bins with particles
+mask_with_particles = final_dry_N > 0
+
+if np.any(mask_with_particles):
+    plt.bar(grid.centers[mask_with_particles], 
+             final_frac_SA[mask_with_particles],
+             width=grid.widths[mask_with_particles],
+             alpha=0.7,
+             edgecolor='black',
+             linewidth=0.5)
+    
+    # Add horizontal line at 0.75 (original wet composition)
+    plt.axhline(y=0.75, color='red', linestyle='--', alpha=0.7, 
+                label='Original wet SA fraction (0.75)')
+
+plt.xlabel('Particle Diameter (nm)')
+plt.ylabel('SA Fraction')
+plt.title('SA Fraction vs Particle Diameter (Final State)')
+plt.xscale('log')
+plt.ylim(0, 1.1)
+plt.grid(True, alpha=0.3)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+
+def plot_final_distribution():
+    """
+    Plot the final particle size distribution (both wet and dry) as a static image.
+    This matches the appearance of the animation frames.
+    """
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Get final state data
+    final_frame = 400  # Last frame
+    d_phys = dist_history[final_frame] * 1e9  # Convert to nm
+    n_wet = wet_history[final_frame]
+    n_dry = dry_history[final_frame]
+    
+    mask = n_wet > 0
+    
+    # Wet bars — black outline, white fill
+    ax.bar(
+        d_phys[mask],
+        n_wet[mask] / grid.delta_log_d,
+        width=grid.widths[mask] * (d_phys[mask] / grid.centers[mask]),
+        align='center',
+        edgecolor='black',
+        linewidth=0.8,
+        label='Wet'
+    )
+    
+    # Dry bars — red outline, fixed grid positions
+    ax.bar(
+        grid.edges[:-1],
+        n_dry / grid.delta_log_d,
+        width=grid.widths,
+        align='edge',
+        edgecolor='red',
+        linewidth=0.8,
+        alpha=0.6,
+        label='Dry'
+    )
+    
+    ax.set_xscale('log')
+    ax.set_xlim(d_min, d_max)
+    ax.set_ylim(0, np.max([w.max() for w in wet_history]) / grid.delta_log_d * 1.1)
+    ax.set_xlabel('Particle diameter [nm]')
+    ax.set_ylabel('Number density [#/cm³]')
+    ax.xaxis.set_major_formatter(ScalarFormatter())
+    ax.ticklabel_format(axis='x', style='plain')
+    ax.legend()
+    
+    # Final time in milliseconds
+    final_time_ms = time_history[final_frame] * 1000
+    plt.text(1.5,40000,f"t={final_time_ms:.2f} ms", size=12)
+
+    plt.tight_layout()
+    plt.show()
+    
+plot_final_distribution()
