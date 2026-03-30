@@ -363,6 +363,8 @@ class DryingModel:
         Jo = (rho_v)**2/(rho_l) * np.sqrt(2*gamma_SA/(np.pi*m_molec))
         dG_star = (16 * np.pi/3) * (v1)**2*gamma_SA**3/((d_mu)**2)
         J = Jo * np.exp(-dG_star/(kB*T))   # nucleation rate; number of events per volume times time [#/m^3*s]
+        J = J
+
 
     def advance(self, wet_pop, dry_pop, gas, dt):
         dm_dt = self.evaporate_water(wet_pop)
