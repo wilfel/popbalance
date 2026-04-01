@@ -376,8 +376,6 @@ class DryingModel:
             m_new = V_new * rho_SA_solid
             mass_transferred = J_vol * m_new    # total mass transffered to dry particles due to nucleation
             gas.mass_SA_gas -= mass_transferred # subtract that mass from the gas
-        
-
 
     def advance(self, wet_pop, dry_pop, gas, dt):
         dm_dt = self.evaporate_water(wet_pop)
