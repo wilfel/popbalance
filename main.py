@@ -100,7 +100,7 @@ class Population:
         
            
         rho_water = 1000
-        self.m = rho_water * self.V   # total mass of particles
+        self.m = rho_water * self.V   # mass of a single particle
         self.m_solute = self.x_solute * self.m
         self.m_water = (1-self.x_solute) * self.m
         self.m_SA = self.x_solute * self.m * self.frac_SA
@@ -178,18 +178,18 @@ class GasPhase:
         the
     """
     def __init__(self):
-        self.conc_SA_gas = 0    # concentration in kg/m^3
-        self.mass_SA_gas = 1e-11
+        self.vol = 1E-6
+        self.conc_SA_gas = 9.289e-08 *1000   # concentration in kg/m^3
+        self.mass_SA_gas = self.conc_SA_gas * self.vol
         self.conc_AS_gas = 0  # concentration in kg/m^3, I think this will effectively stay 0
-    
+
     def update_gas(self, dm_SA_dt, dm_cond_dt, wet_pop, dt):
         pass
         gas.mass_SA_gas += -np.sum(dm_SA_dt*wet_pop.N_dist) * dt   # kg
         #N = 5.63e7    # total number of particles initially
         #n_density = 1E15    # check this idk
         #vol = N / n_density
-        vol = 1E-6
-        gas.conc_SA_gas = gas.mass_SA_gas / vol
+        gas.conc_SA_gas = gas.mass_SA_gas / self.vol
         
 
 class DryingModel:
@@ -297,7 +297,6 @@ class DryingModel:
         C_SA_surface = p_SA_surface * M_sa / (R * T)
         C_SA_bulk    = p_SA_bulk    * M_sa / (R * T)
         dm_SA_dt = -k_mass * A_d * (C_SA_surface-C_SA_bulk)  # kg/s
-        print(p_SA_bulk)
         return dm_SA_dt
     
     def condensation(self, gas):
@@ -349,21 +348,35 @@ class DryingModel:
         Na = 6.022E23       # Avogrados number
         M_sa = 0.11809      # molar mass of succinic acid, kg/m^3
         rho_SA_solid = 1560     # kg/m^3
-        R = 8.3145          # J/mol*K
+        vol = 1E-6      # volume simulated in m^3
         rho_SA_vapor = gas.conc_SA_gas
-        rho_v = rho_SA_vapor * Na / M_sa   # Number density of vapor
-        rho_l = rho_SA_solid * Na / M_sa   # Number density of liquid (Solid)?
-        gamma_SA = 67.8 /1000   # surface tension (SFE) of succinic acid in N/m
-        m_molec = M_sa / Na     # Mass of 1 molecule of SA (kg)
+        R = 8.3145          # J/mol*K
         P_v = rho_SA_vapor * R * T /M_sa
         P_sat = 1.95E-3      # Saturation vapor pressure of SA in Pa
-        v1 = P_v / np.sqrt(2*np.pi*m_molec*kB*T)
         S = P_v / P_sat
-        d_mu = kB * T * np.log(S)
-        Jo = (rho_v)**2/(rho_l) * np.sqrt(2*gamma_SA/(np.pi*m_molec))
-        dG_star = (16 * np.pi/3) * (v1)**2*gamma_SA**3/((d_mu)**2)
-        J = Jo * np.exp(-dG_star/(kB*T))   # nucleation rate; number of events per volume times time [#/m^3*s]
-        J = J
+        if S > 1:
+            rho_v = rho_SA_vapor * Na / M_sa   # Number density of vapor
+            rho_l = rho_SA_solid * Na / M_sa   # Number density of liquid (Solid)?
+            gamma_SA = 67.8 /1000   # surface tension (SFE) of succinic acid in N/m
+            m_molec = M_sa / Na     # Mass of 1 molecule of SA (kg)
+            #v1 = P_v / np.sqrt(2*np.pi*m_molec*kB*T)
+            v_l = M_sa / (Na * rho_SA_solid)   # m³/molecule — volume per molecule in solid
+            d_mu = kB * T * np.log(S)
+            Jo = (rho_v)**2/(rho_l) * np.sqrt(2*gamma_SA/(np.pi*m_molec))
+            dG_star = (16 * np.pi/3) * (v_l)**2*gamma_SA**3/((d_mu)**2)
+            J = Jo * np.exp(-dG_star/(kB*T))   # nucleation rate; number of events per volume times time [#/m^3*s]
+            J_vol = J * vol # number of nucleations over the simulated 1 cm^3 volume
+        else:
+            J_vol = 0
+        
+        if J_vol > 0:
+            dry_pop.N_dist[0] += J_vol      # add nnucleated particles to smallest bin (~ 1 nm)   
+            d_new = dry_pop.d_dist[0]
+            V_new = np.pi * (d_new)**3 / 6
+            m_new = V_new * rho_SA_solid
+            mass_transferred = J_vol * m_new    # total mass transffered to dry particles due to nucleation
+            gas.mass_SA_gas -= mass_transferred # subtract that mass from the gas
+        
 
 
     def advance(self, wet_pop, dry_pop, gas, dt):
@@ -372,6 +385,7 @@ class DryingModel:
         dd_cond_dt, dm_cond_dt = self.condensation(gas)
         wet_pop.wet_update_diameter(dm_dt, dm_SA_dt, dt)
         dry_pop.dry_update_diameter(dm_cond_dt,dt)
+        self.nucleation(dry_pop,gas)
         gas.update_gas(dm_SA_dt, dm_cond_dt, wet_pop, dt)
         self.wet_to_dry(wet_pop, dry_pop, dt)
 
