@@ -201,7 +201,7 @@ class CohortPopulation:
 class GasPhase:
     def __init__(self):
         self.vol          = 1e-6                        # m³
-        self.conc_SA_gas  = 9.289e-08 * 1000            # kg/m³
+        self.conc_SA_gas  = 9.289e-08 * 210           # kg/m³
         self.mass_SA_gas  = self.conc_SA_gas * self.vol  # kg
         self.conc_AS_gas  = 0.0
 
@@ -590,3 +590,60 @@ plt.title("Final Diameter of Each Cohort vs Birth Time")
 plt.grid(True)
 plt.tight_layout()
 plt.show()
+
+
+def plot_final_distribution():
+    """
+    Plot the final particle size distribution (both wet and dry) as a static image.
+    This matches the appearance of the animation frames.
+    """
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Get final state data
+    final_frame = 400  # Last frame
+    d_phys = dist_history[final_frame] * 1e9  # Convert to nm
+    n_wet = wet_history[final_frame]
+    n_dry = dry_history[final_frame]
+    
+    mask = n_wet > 0
+    
+    # Wet bars — black outline, white fill
+    ax.bar(
+        d_phys[mask],
+        n_wet[mask] / grid.delta_log_d,
+        width=grid.widths[mask] * (d_phys[mask] / grid.centers[mask]),
+        align='center',
+        edgecolor='black',
+        linewidth=0.8,
+        label='Wet'
+    )
+    
+    # Dry bars — red outline, fixed grid positions
+    ax.bar(
+        grid.edges[:-1],
+        n_dry / grid.delta_log_d,
+        width=grid.widths,
+        align='edge',
+        edgecolor='red',
+        linewidth=0.8,
+        alpha=0.6,
+        label='Dry'
+    )
+    
+    ax.set_xscale('log')
+    ax.set_xlim(d_min, d_max)
+    ax.set_ylim(0, np.max([w.max() for w in wet_history]) / grid.delta_log_d * 1.1)
+    ax.set_xlabel('Particle diameter [nm]')
+    ax.set_ylabel('Number density [#/cm³]')
+    ax.xaxis.set_major_formatter(ScalarFormatter())
+    ax.ticklabel_format(axis='x', style='plain')
+    ax.legend()
+    
+    # Final time in milliseconds
+    final_time_ms = time_history[final_frame] * 1000
+    plt.text(1.5,40000,f"t={final_time_ms:.2f} ms", size=12)
+
+    plt.tight_layout()
+    plt.show()
+    
+plot_final_distribution()
