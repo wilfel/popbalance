@@ -8,20 +8,22 @@ New version to clean up structure (not tracking origin bin, etc.) and implement 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from matplotlib.ticker import ScalarFormatter
+import os
+import shutil
 
 # --- Define values ---
 d_min = 1           # minimum diameter plotted (nm)
 d_max = 4000        # maximum diameter plotted (nm)
 N_bins = 150         # number of bins to create
 dt = 0.0000001           # length of one time step in simulation (s)
-total_time = 0.005   # total simulation time (s)
+total_time = 0.050   # total simulation time (s)
 plot_interval_seconds = 0.00001       # interval to plot (time length between screenshots plotted)
 plot_interval = int(plot_interval_seconds / dt) # plot interval in terms of time steps
 init_total_num = 5.63e7    # total number of particles initially
 #init_mean = 630
-init_mean = 825  # initial geometric mean diameter of droplets (nm)
+init_mean = 630#825 initial geometric mean diameter of droplets (nm)
 init_sd = 1.68       # initial geometric standard deviation of the lognormal dist (nm)
 
 #init_mean = 2000         # initial geometric mean diameter of droplets (nm)
@@ -89,6 +91,8 @@ class Cohort:
     m_SA: float
     m_AS: float
     t_born: float = 0.0
+    N_added: float = 0.0      # cumulative particles added via condensation/merging
+
     
 class WetPopulation:
     """
@@ -166,7 +170,7 @@ class DryPopulation:
     def add_cohort(self, N, d, m, m_SA, m_AS, t):
         """Add a new cohort (from nucleation or wet→dry transfer)."""
         if N > 0:
-            self.cohorts.append(Cohort(N=N, d=d, m=m, m_SA=m_SA, m_AS=m_AS, t_born=t))
+            self.cohorts.append(Cohort(N=N, d=d, m=m, m_SA=m_SA, m_AS=m_AS, t_born=t, N_added = N))
             
     def project_to_grid(self, grid):
         """
@@ -174,16 +178,26 @@ class DryPopulation:
         Returns N_dist array (number per bin, not density).
         """
         N_dist = np.zeros(grid.n_bins)
+        log_edges = np.log(grid.edges)
         for c in self.cohorts:
             if c.N <= 0:
                 continue
             d_nm = c.d * 1e9
-            j = np.searchsorted(grid.edges, d_nm) - 1
+            log_d = np.log(max(d_nm, grid.edges[0]))
+            j = np.searchsorted(log_edges, log_d) - 1
             j = np.clip(j, 0, grid.n_bins - 1)
-            N_dist[j] += c.N
+            
+            # Fractional position within bin
+            if j < grid.n_bins - 1:
+                f = (log_d - log_edges[j]) / (log_edges[j+1] - log_edges[j])
+                f = np.clip(f, 0, 1)
+                N_dist[j]   += c.N * (1 - f)
+                N_dist[j+1] += c.N * f
+            else:
+                N_dist[j] += c.N
         return N_dist
-    
-    def merge_similar_cohorts(self, tol=0.01):
+        
+    def merge_similar_cohorts(self, tol):
         """
         Merge cohorts within fractional diameter of each other to keep
         the cohort list length manageable. Conserves total number and mass.
@@ -199,6 +213,7 @@ class DryPopulation:
             if abs(c.d - prev.d) / max(prev.d, 1e-30) < tol:    
                 total_N = prev.N + c.N
                 # Number-weighted average of per-particle quantities if they're close enough
+                prev.N_added = prev.N_added + c.N_added    # accumulate additions
                 prev.d   = (prev.d   * prev.N + c.d   * c.N) / total_N
                 prev.m   = (prev.m   * prev.N + c.m   * c.N) / total_N
                 prev.m_SA= (prev.m_SA* prev.N + c.m_SA* c.N) / total_N
@@ -211,7 +226,7 @@ class DryPopulation:
 class GasPhase:
     def __init__(self):
         self.vol          = 1e-6                        # m³
-        self.conc_SA_gas  = 9.289e-08 * 210           # kg/m³
+        self.conc_SA_gas  = 9.289e-08 * 600          # kg/m³
         self.mass_SA_gas  = self.conc_SA_gas * self.vol  # kg
         self.conc_AS_gas  = 0.0
 
@@ -301,7 +316,7 @@ class DryingModel:
         T = 298.15
         R = 8.314
         M_sa = 0.11809
-        D_SA   = 2e-6
+        D_SA = 9.52E-6 
         alpha  = 1.0
         rho_sa = 1560.0
         p_sat_SA = 2.55e-5      # Pa — solid-phase saturation vapour pressure
@@ -334,7 +349,6 @@ class DryingModel:
             # Recompute diameter from mass for consistency
             c.d   = (c.m / rho_sa * 6 / np.pi)**(1/3) if c.m > 0 else 0.0
             total_mass_removed += delta_m * c.N
-
         return total_mass_removed
     
     def nucleation(self, cohort_pop, gas, t):
@@ -371,7 +385,6 @@ class DryingModel:
         s1       = (36 * np.pi)**(1/3) * v_l**(2/3)
         theta_inf= gamma * s1 / (kB * T)
         nc       = (2 * theta_inf / (3 * np.log(S)))**3
-
         # Nucleation barrier (eq. 3.28)
         dG_star  = (16 * np.pi / 3) * v_l**2 * gamma**3 / d_mu**2
 
@@ -379,8 +392,11 @@ class DryingModel:
         Jo       = (rho_v_num**2 / rho_l_num) * np.sqrt(2 * gamma / (np.pi * m_molec))
 
         J        = Jo * np.exp(-dG_star / (kB * T))    # #/m³/s
-        J_vol    = int(np.round(J * vol))               # whole nucleation events
-
+        J_vol    = J*vol*dt              # whole nucleation events
+        if J_vol > 0:
+            N_new = np.random.poisson(J_vol)
+        else:
+            N_new = 0
         if J_vol <= 0:
             return
 
@@ -391,7 +407,7 @@ class DryingModel:
 
         # --- Create new cohort ---
         cohort_pop.add_cohort(
-            N    = J_vol,
+            N    = N_new,
             d    = d_cluster,
             m    = m_cluster,
             m_SA = m_cluster,
@@ -400,7 +416,7 @@ class DryingModel:
         )
 
         # --- Remove mass from gas ---
-        mass_transferred = J_vol * m_cluster
+        mass_transferred = N_new * m_cluster
         gas.remove_mass(mass_transferred)
         
     def wet_to_dry(self, wet_pop, cohort_pop, t):
@@ -471,7 +487,7 @@ class DryingModel:
         self.wet_to_dry(wet_pop, cohort_pop, t)
 
         # --- Merge near-identical cohorts to control list length ---
-        cohort_pop.merge_similar_cohorts(tol=0.01)
+        cohort_pop.merge_similar_cohorts(tol=0.02)
 
 
 # =============================================================================
@@ -492,6 +508,7 @@ drying          = DryingModel()
 wet_history     = []
 dry_history     = []    # stored as projected N_dist arrays for plotting
 gas_history     = []
+relative_gas_history = []
 time_history    = []
 dist_history    = []
 
@@ -502,11 +519,27 @@ for step in range(grid.n_steps):
     if step % plot_interval == 0:
         wet_history.append(wet_pop.N_dist.copy())
         dry_history.append(cohort_pop.project_to_grid(grid))
-        gas_history.append(gas.conc_SA_gas)
+        T = 298.15      # K
+        R = 8.314   # J/molK
+        M_sa = 0.11809 # kg/mol
+        p_sat_SA = 1.95E-3      # Pa
+        gas_history.append(gas.conc_SA_gas * R * T/M_sa)
+        relative_gas_history.append((gas.conc_SA_gas * R * T/M_sa)/p_sat_SA)
+        #         #C_sat_kgm3    = p_sat_SA    * M_sa / (R * T)
         time_history.append(t)
         dist_history.append(wet_pop.d_dist.copy())
 
         n_cohorts = len(cohort_pop.cohorts)
+        
+        all_d_sorted = sorted([c.d * 1e9 for c in cohort_pop.cohorts])
+        if len(all_d_sorted) > 1:
+            gaps = [(all_d_sorted[i+1] - all_d_sorted[i]) / all_d_sorted[i] 
+                    for i in range(len(all_d_sorted)-1)]
+            idx = int(np.argmax(gaps))
+            print(f"t={t*1000:.2f} ms | "
+                f"Largest gap: {all_d_sorted[idx]:.2f} → {all_d_sorted[idx+1]:.2f} nm "
+                f"({gaps[idx]*100:.1f}%) | n_cohorts={len(cohort_pop.cohorts)}")
+
 
 # =============================================================================
 # SUMMARY STATS
@@ -554,10 +587,11 @@ def update(frame):
            edgecolor='red', linewidth=0.8, alpha=0.6, label='Dry')
 
     ax.set_xscale('log')
-    ax.set_xlim(d_min, d_max)
-    ax.set_ylim(0, max((w.max() for w in wet_history), default=1) / grid.delta_log_d * 1.1)
-    ax.set_xlabel('Particle diameter [nm]')
-    ax.set_ylabel('dN/d(log d)  [#]')
+    ax.set_xlim(d_min, 500)
+    ax.set_ylim(0, max((w.max() for w in dry_history), default=1) / grid.delta_log_d * 1.1)
+    ax.set_xlabel('Particle diameter [nm]', fontsize="12")
+    ax.set_ylabel('dN/d(log d)  [#]',fontsize="12")
+    ax.tick_params(axis='both', labelsize=11)
     ax.xaxis.set_major_formatter(ScalarFormatter())
     ax.ticklabel_format(axis='x', style='plain')
     ax.legend()
@@ -572,81 +606,133 @@ plt.show()
 # =============================================================================
 
 plt.figure()
-plt.plot(time_history, gas_history)
+plt.plot(time_history, relative_gas_history)
 plt.xlabel("Time (s)")
-plt.ylabel("SA Gas Concentration (kg/m³)")
-plt.title("Succinic Acid Gas Concentration vs Time")
-plt.grid(True)
-plt.tight_layout()
-plt.show()
-
-# =============================================================================
-# COHORT DIAMETER HISTORY (shows individual cohort growth)
-# =============================================================================
-
-plt.figure()
-for c in cohort_pop.cohorts[::max(1, len(cohort_pop.cohorts)//50)]:   # sample ~50 cohorts
-    plt.scatter(c.t_born * 1000, c.d * 1e9, s=5, color='steelblue', alpha=0.6)
-plt.xlabel("Time nucleated / dried  (ms)")
-plt.ylabel("Final diameter  (nm)")
-plt.title("Final Diameter of Each Cohort vs Birth Time")
+plt.ylabel(r"SA Supersaturation Ratio ($P_v / P_v^*$)", fontsize=12)
+plt.xticks(fontsize = 11)
+plt.yticks(fontsize = 11)
 plt.grid(True)
 plt.tight_layout()
 plt.show()
 
 
-def plot_final_distribution():
-    """
-    Plot the final particle size distribution (both wet and dry) as a static image.
-    This matches the appearance of the animation frames.
-    """
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Get final state data
-    final_frame = 400  # Last frame
-    d_phys = dist_history[final_frame] * 1e9  # Convert to nm
-    n_wet = wet_history[final_frame]
-    n_dry = dry_history[final_frame]
-    
-    mask = n_wet > 0
-    
-    # Wet bars — black outline, white fill
-    ax.bar(
-        d_phys[mask],
-        n_wet[mask] / grid.delta_log_d,
-        width=grid.widths[mask] * (d_phys[mask] / grid.centers[mask]),
-        align='center',
-        edgecolor='black',
-        linewidth=0.8,
-        label='Wet'
-    )
-    
-    # Dry bars — red outline, fixed grid positions
-    ax.bar(
-        grid.edges[:-1],
-        n_dry / grid.delta_log_d,
-        width=grid.widths,
-        align='edge',
-        edgecolor='red',
-        linewidth=0.8,
-        alpha=0.6,
-        label='Dry'
-    )
-    
-    ax.set_xscale('log')
-    ax.set_xlim(d_min, d_max)
-    ax.set_ylim(0, np.max([w.max() for w in wet_history]) / grid.delta_log_d * 1.1)
-    ax.set_xlabel('Particle diameter [nm]')
-    ax.set_ylabel('Number density [#/cm³]')
-    ax.xaxis.set_major_formatter(ScalarFormatter())
-    ax.ticklabel_format(axis='x', style='plain')
-    ax.legend()
-    
-    # Final time in milliseconds
-    final_time_ms = time_history[final_frame] * 1000
-    plt.text(1.5,40000,f"t={final_time_ms:.2f} ms", size=12)
 
-    plt.tight_layout()
-    plt.show()
-    
-plot_final_distribution()
+def save_snapshots():
+    """
+    Save a snapshot of the particle size distribution every 0.5 ms into 'snapshots/'.
+    Clears the folder at the start of every run.
+    """
+    snapshot_dir = "snapshots"
+    if os.path.exists(snapshot_dir):
+        shutil.rmtree(snapshot_dir)
+    os.makedirs(snapshot_dir)
+
+    snapshot_interval_ms = 1
+    y_max = np.max([w.max() for w in wet_history]) / grid.delta_log_d * 1.1
+    last_saved_ms = -np.inf
+
+    for frame, t in enumerate(time_history):
+        t_ms = t * 1000
+        if t_ms - last_saved_ms < snapshot_interval_ms:
+            continue
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        d_phys = dist_history[frame] * 1e9
+        n_wet  = wet_history[frame]
+        n_dry  = dry_history[frame]
+        mask   = n_wet > 0
+
+        ax.bar(
+            d_phys[mask],
+            n_wet[mask] / grid.delta_log_d,
+            width=grid.widths[mask] * (d_phys[mask] / grid.centers[mask]),
+            align='center',
+            edgecolor='black',
+            linewidth=0.8,
+            label='Wet'
+        )
+        ax.bar(
+            grid.edges[:-1],
+            n_dry / grid.delta_log_d,
+            width=grid.widths,
+            align='edge',
+            edgecolor='red',
+            linewidth=0.8,
+            alpha=0.6,
+            label='Dry'
+        )
+
+        ax.set_xscale('log')
+        ax.set_xlim(d_min, d_max)
+        ax.set_ylim(0, y_max)
+        ax.set_xlabel('Particle diameter [nm]', fontsize=16)
+        ax.set_ylabel('dN/d(log d)  [#]', fontsize=16)
+        ax.tick_params(axis = "both", labelsize = 13)
+        ax.xaxis.set_major_formatter(ScalarFormatter())
+        ax.ticklabel_format(axis='x', style='plain')
+        ax.legend()
+        ax.set_title(f"Simulated Drying  (t = {t_ms:.2f} ms)")
+
+        filename = os.path.join(snapshot_dir, f"snapshot_{t_ms:07.3f}ms.png")
+        fig.savefig(filename, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+
+        last_saved_ms = t_ms
+
+    print(f"Saved {len(os.listdir(snapshot_dir))} snapshots to '{snapshot_dir}/'")
+
+save_snapshots()
+
+# =============================================================================
+# FINAL COMPOSITION vs SIZE PLOT (wt.% SA vs diameter)
+# =============================================================================
+
+# --- Collect dry cohort data ---
+d_dry = []
+wtpct_SA_dry = []
+weights_dry = []
+
+for c in cohort_pop.cohorts:
+    if c.N <= 0 or c.m <= 0:
+        continue
+    d_nm = c.d * 1e9
+    wt_pct = 100 * c.m_SA / c.m   # wt.% SA
+
+    d_dry.append(d_nm)
+    wtpct_SA_dry.append(wt_pct)
+    weights_dry.append(c.N)
+
+d_dry = np.array(d_dry)
+wtpct_SA_dry = np.array(wtpct_SA_dry)
+weights_dry = np.array(weights_dry)
+
+# --- Optional: include remaining wet particles ---
+mask = wet_pop.N_dist > 0
+d_wet = wet_pop.d_dist[mask] * 1e9
+wtpct_SA_wet = 100 * (wet_pop.m_SA[mask] / wet_pop.m[mask])
+weights_wet = wet_pop.N_dist[mask]
+
+# --- Combine (optional, comment out if you only want dry) ---
+d_all = np.concatenate([d_dry, d_wet])
+wtpct_all = np.concatenate([wtpct_SA_dry, wtpct_SA_wet])
+weights_all = np.concatenate([weights_dry, weights_wet])
+
+# =============================================================================
+# PLOT
+# =============================================================================
+
+plt.figure(figsize=(8,6))
+
+# Scatter (size vs composition)
+plt.scatter(d_all, wtpct_all, s=10, alpha=0.6)
+
+# Optional: size-weighted visualization (better physically)
+# plt.scatter(d_all, wtpct_all, s=weights_all / weights_all.max() * 50, alpha=0.6)
+
+plt.xscale('log')
+plt.xlabel('Particle diameter [nm]', fontsize=12)
+plt.ylabel('wt.% SA', fontsize=12)
+plt.title('Final Particle Composition vs Size', fontsize=13)
+plt.tight_layout()
+plt.show()
