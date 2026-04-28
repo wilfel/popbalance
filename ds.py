@@ -17,12 +17,13 @@ import shutil
 d_min = 1           # minimum diameter plotted (nm)
 d_max = 4000        # maximum diameter plotted (nm)
 N_bins = 150         # number of bins to create
-dt = 0.000001           # length of one time step in simulation (s)
-total_time = 0.5   # total simulation time (s)
+dt = 0.0000001           # length of one time step in simulation (s)
+total_time = 0.010   # total simulation time (s)
 plot_interval_seconds = 0.00001       # interval to plot (time length between screenshots plotted)
 plot_interval = int(plot_interval_seconds / dt) # plot interval in terms of time steps
 init_total_num = 5.63e7    # total number of particles initially
-init_mean = 630 #825 initial geometric mean diameter of droplets (nm)
+#init_mean = 630
+init_mean = 630#825 initial geometric mean diameter of droplets (nm)
 init_sd = 1.68       # initial geometric standard deviation of the lognormal dist (nm)
 
 #init_mean = 2000         # initial geometric mean diameter of droplets (nm)
@@ -77,7 +78,7 @@ class Cohort:
     All particles in a cohort share the same diameter and grow together.
     
     Attributes:
-        N: number of particles in this group
+        N: number of particles in this cohort
         d: diameter of a single particle (m)
         m: mass of a single particle (kg)
         m_SA: mass of succinic acid in a single particle (kg)
@@ -92,6 +93,7 @@ class Cohort:
     t_born: float = 0.0
     N_added: float = 0.0      # cumulative particles added via condensation/merging
 
+    
 class WetPopulation:
     """
     Represents the entire population of particles
@@ -100,24 +102,14 @@ class WetPopulation:
         grid (class): Contains all static information on grid where population is plotted
         N_density (np.ndarray): Array containing number density distribution evaluated at bin centers
         N_dist (np.ndarray): Array containing number distribution of particles in each bin
-        d_dist (np.ndarray): Bin center diameters in meters (converted from nm)
-        V (np.ndarray): Volume of a single particle at each bin center (m^3)
-        frac_SA (np.ndarray): Per-bin sulfuric acid mass fraction (default: 0.75)
-        frac_AS (np.ndarray): Per-bin ammonium sulfate mass fraction (default: 0.25)
-        x_solute (np.ndarray): Per-bin total solute concentration (g/L), uniform at initialization
-        m (np.ndarray): Mass of a single water particle at each bin center (kg)
-        m_solute (np.ndarray): Solute mass per single particle at each bin center (kg)
-        m_water (np.ndarray): Water mass per single particle at each bin center (kg)
-        m_SA (np.ndarray): Sulfuric acid mass per single particle at each bin center (kg)
         
     Methods:
-        wet_update_diameter(dm_dt,dm_SA_dt,dt): pdates diameter and other variables associated with the wet population based on a mass loss rate.
     """
     def __init__(self, grid, N_dens_dist_init):
-        rho_water = 1000    # density of water [kg/m^3]
-        conc_SA = 0.75      # solute fraction (75 wt.%) or conc in g/L
-        conc_AS = 0.25      # solute fraction (25 wt.%) or conc in g/L
-        concentration = 0.001   # concentration of total solute in g/L
+        rho_water = 1000
+        conc_SA = 0.75
+        conc_AS = 0.25
+        concentration = 0.001
         
         self.grid = grid    
         self.N_density = N_dens_dist_init
@@ -125,7 +117,7 @@ class WetPopulation:
         self.N_dist = self.N_density * grid.delta_log_d   # initial total number in each bin
         self.V = np.pi/6 * self.d_dist**3   # volume of each center of a SINGLE particle (m^3)
         n = self.grid.n_bins
-        self.frac_SA = np.full(n, conc_SA)  # array full of initial value for every droplet
+        self.frac_SA = np.full(n, conc_SA)
         self.frac_AS = np.full(n, conc_AS)
         self.x_solute = np.full(n, concentration)
         self.m = rho_water * self.V   # mass of a single particle
@@ -234,7 +226,7 @@ class DryPopulation:
 class GasPhase:
     def __init__(self):
         self.vol          = 1e-6                        # m³
-        self.conc_SA_gas  = 9.289e-08 * 11          # kg/m³
+        self.conc_SA_gas  = 0#600*9.289e-08          # kg/m³
         self.mass_SA_gas  = self.conc_SA_gas * self.vol  # kg
         self.conc_AS_gas  = 0.0
 
@@ -315,11 +307,13 @@ class DryingModel:
     
     def condensation(self, cohort_pop, gas, dt):
         """
-        Apply condensation to every cohort (dry particle group)
-        Returns total mass (kg) transferred from gas to cohorts this timestep.
+        Apply condensation to every cohort (dry particle group).
+        Returns:
+            total_mass_removed (float): Total SA mass [kg] transferred from gas to cohorts this timestep.
+            condensation_rate  (float): Total SA condensation rate [kg/s] summed over all cohorts.
         """
         if not cohort_pop.cohorts:
-            return 0.0
+            return 0.0, 0.0
 
         T = 298.15
         R = 8.314
@@ -348,6 +342,7 @@ class DryingModel:
         dm_dt  = np.pi * rho_sa * d_arr**2 / 2 * dd_dt   # kg/s per particle
 
         total_mass_removed = 0.0
+        total_rate = 0.0           # kg/s summed over all particles
         for i, c in enumerate(cohort_pop.cohorts):
             delta_d = dd_dt[i] * dt
             delta_m = dm_dt[i] * dt
@@ -357,32 +352,37 @@ class DryingModel:
             # Recompute diameter from mass for consistency
             c.d   = (c.m / rho_sa * 6 / np.pi)**(1/3) if c.m > 0 else 0.0
             total_mass_removed += delta_m * c.N
-        return total_mass_removed
+            total_rate         += dm_dt[i] * c.N   # kg/s contribution from this cohort
+
+        return total_mass_removed, total_rate
     
     def nucleation(self, cohort_pop, gas, t):
         """
         Compute nucleation rate via CNT. If J_vol >= 1, create a new cohort
         at the critical cluster size and subtract mass from gas.
-        """
-        # Constants
-        T        = 298.15       # Temp in K
-        kB       = 1.380649e-23 # Boltzmann constant in m^2*kg*s^-2*K^-1
-        Na       = 6.022e23     # Avogadros number
-        M_sa     = 0.11809      # Molecular weight of succinic acid kg/mol
-        rho_sa   = 1560.0       # Density of solid succinic acid in kg/m^3
-        vol      = 1e-6         # Volume simulated in m^3 (pocket of 1 cm^3)
-        R        = 8.3145       # Gas constant in J/molK
-        P_sat    = 1.95e-3      # Vapor pressure of succinic acid in Pa
 
-        rho_v    = gas.conc_SA_gas  # Density of gas currently in kg/m^3
-        P_v      = rho_v * R * T / M_sa # Vapor pressure of gas
+        Returns:
+            J     (float): Volumetric nucleation rate [#/m³/s]  (0 if S <= 1)
+            N_new (int):   Number of new particles nucleated this timestep
+        """
+        T        = 298.15
+        kB       = 1.380649e-23
+        Na       = 6.022e23
+        M_sa     = 0.11809
+        rho_sa   = 1560.0
+        vol      = 1e-6
+        R        = 8.3145
+        P_sat    = 1.95e-3
+
+        rho_v    = gas.conc_SA_gas
+        P_v      = rho_v * R * T / M_sa
         S        = P_v / P_sat
 
         if S <= 1.0:
-            return
+            return 0.0, 0
 
         # CNT quantities
-        gamma    = (67.8e-3) * 0.48         # N/m
+        gamma    = 67.8e-3          # N/m
         m_molec  = M_sa / Na        # kg/molecule
         v_l      = M_sa / (Na * rho_sa)    # m³/molecule  (eq. 3.23)
         rho_v_num= rho_v * Na / M_sa       # number density, #/m³
@@ -407,7 +407,7 @@ class DryingModel:
         else:
             N_new = 0
         if J_vol <= 0:
-            return
+            return 0.0, 0
 
         # --- Critical cluster properties ---
         nc_int       = max(int(np.round(nc)), 1)
@@ -427,6 +427,8 @@ class DryingModel:
         # --- Remove mass from gas ---
         mass_transferred = N_new * m_cluster
         gas.remove_mass(mass_transferred)
+
+        return J, N_new
         
     def wet_to_dry(self, wet_pop, cohort_pop, t):
         """
@@ -477,17 +479,24 @@ class DryingModel:
     
 
     def advance(self, wet_pop, cohort_pop, gas, dt, t):
+        """
+        Advance all physics by one timestep.
+
+        Returns:
+            nuc_rate  (float): Volumetric nucleation rate [#/m³/s]
+            cond_rate (float): Total condensation rate [kg/s] across all dry cohorts
+        """
         # --- Wet population ---
         dm_water_dt = self.evaporate_water(wet_pop)
         dm_SA_dt    = self.wet_SA_massloss(wet_pop, gas)
         wet_pop.wet_update_diameter(dm_water_dt, dm_SA_dt, dt)
 
         # --- Dry cohorts: grow via condensation ---
-        mass_cond = self.condensation(cohort_pop, gas, dt)
+        mass_cond, cond_rate = self.condensation(cohort_pop, gas, dt)
         gas.remove_mass(mass_cond)
 
         # --- Nucleation: may add new cohort ---
-        self.nucleation(cohort_pop, gas, t)
+        nuc_rate, _ = self.nucleation(cohort_pop, gas, t)
 
         # --- Update gas from wet-particle SA flux ---
         gas.update_from_wet(dm_SA_dt, wet_pop.N_dist, dt)
@@ -497,6 +506,8 @@ class DryingModel:
 
         # --- Merge near-identical cohorts to control list length ---
         cohort_pop.merge_similar_cohorts(tol=0.02)
+
+        return nuc_rate, cond_rate
 
 
 # =============================================================================
@@ -514,38 +525,59 @@ drying          = DryingModel()
 # TIME LOOP
 # =============================================================================
 
-wet_history     = []
-dry_history     = []    # stored as projected N_dist arrays for plotting
-gas_history     = []
+wet_history          = []
+dry_history          = []    # stored as projected N_dist arrays for plotting
+gas_history          = []
 relative_gas_history = []
-time_history    = []
-dist_history    = []
+time_history         = []
+dist_history         = []
+nucleation_rate_history   = []   # J  [#/m³/s]   — instantaneous at each plot frame
+condensation_rate_history = []   # kg/s summed over all dry particles — instantaneous
+
+# Accumulators between plot frames (averaged over the interval)
+_nuc_acc  = 0.0
+_cond_acc = 0.0
+_acc_count = 0
 
 for step in range(grid.n_steps):
     t = step * dt
-    drying.advance(wet_pop, cohort_pop, gas, dt, t)
+    nuc_rate, cond_rate = drying.advance(wet_pop, cohort_pop, gas, dt, t)
+
+    # Accumulate rates within this plot interval for averaging
+    _nuc_acc  += nuc_rate
+    _cond_acc += cond_rate
+    _acc_count += 1
 
     if step % plot_interval == 0:
         wet_history.append(wet_pop.N_dist.copy())
         dry_history.append(cohort_pop.project_to_grid(grid))
-        T = 298.15      # K
-        R = 8.314   # J/molK
-        M_sa = 0.11809 # kg/mol
-        p_sat_SA = 1.95E-3      # Pa
-        gas_history.append(gas.conc_SA_gas * R * T/M_sa)
-        relative_gas_history.append((gas.conc_SA_gas * R * T/M_sa)/p_sat_SA)
-        #         #C_sat_kgm3    = p_sat_SA    * M_sa / (R * T)
+        T_K = 298.15
+        R   = 8.314
+        M_sa = 0.11809
+        p_sat_SA = 1.95E-3
+        gas_history.append(gas.conc_SA_gas * R * T_K / M_sa)
+        relative_gas_history.append((gas.conc_SA_gas * R * T_K / M_sa) / p_sat_SA)
         time_history.append(t)
         dist_history.append(wet_pop.d_dist.copy())
 
+        # Store interval-averaged rates
+        nucleation_rate_history.append(_nuc_acc / max(_acc_count, 1))
+        condensation_rate_history.append(_cond_acc / max(_acc_count, 1))
+
+        # Reset accumulators
+        _nuc_acc   = 0.0
+        _cond_acc  = 0.0
+        _acc_count = 0
+
         n_cohorts = len(cohort_pop.cohorts)
-        
         all_d_sorted = sorted([c.d * 1e9 for c in cohort_pop.cohorts])
         if len(all_d_sorted) > 1:
             gaps = [(all_d_sorted[i+1] - all_d_sorted[i]) / all_d_sorted[i] 
                     for i in range(len(all_d_sorted)-1)]
             idx = int(np.argmax(gaps))
-            print(f"t={t*1000:.2f} ms")
+            print(f"t={t*1000:.2f} ms | "
+                f"Largest gap: {all_d_sorted[idx]:.2f} → {all_d_sorted[idx+1]:.2f} nm "
+                f"({gaps[idx]*100:.1f}%) | n_cohorts={len(cohort_pop.cohorts)}")
 
 
 # =============================================================================
@@ -594,7 +626,7 @@ def update(frame):
            edgecolor='red', linewidth=0.8, alpha=0.6, label='Dry')
 
     ax.set_xscale('log')
-    ax.set_xlim(d_min, 500)
+    ax.set_xlim(d_min, 2000)
     ax.set_ylim(0, max((w.max() for w in dry_history), default=1) / grid.delta_log_d * 1.1)
     ax.set_xlabel('Particle diameter [nm]', fontsize="12")
     ax.set_ylabel('dN/d(log d)  [#]',fontsize="12")
@@ -603,7 +635,7 @@ def update(frame):
     ax.ticklabel_format(axis='x', style='plain')
     ax.legend()
     t_ms = time_history[frame] * 1000
-    ax.set_title(f"Simulated Drying — Cohort Tracking  (t = {t_ms:.2f} ms)")
+    ax.set_title(f"Simulated Drying (t = {t_ms:.2f} ms)")
 
 ani = FuncAnimation(fig, update, frames=len(wet_history), interval=150, blit=False)
 plt.show()
@@ -614,15 +646,76 @@ plt.show()
 
 plt.figure()
 plt.plot(time_history, relative_gas_history)
-plt.xlabel("Time (s)")
-plt.ylabel(r"SA Supersaturation Ratio ($P_v / P_v^*$)", fontsize=12)
-plt.xticks(fontsize = 11)
-plt.yticks(fontsize = 11)
-plt.grid(True)
+plt.xlabel("Time (s)", fontsize = 15)
+plt.ylabel(r"SA Supersaturation Ratio ($P_v / P_v^*$)", fontsize=15)
+plt.xticks(fontsize=13)
+plt.yticks(fontsize=13)
+plt.grid(False)
+plt.tight_layout()
+plt.show()
+
+# =============================================================================
+# NUCLEATION RATE vs TIME
+# =============================================================================
+
+time_ms = np.array(time_history) * 1000   # convert to ms for all rate plots
+
+fig, ax = plt.subplots(figsize=(8, 5))
+ax.plot(time_ms, nucleation_rate_history, linewidth=1.5)
+ax.set_xlabel("Time (ms)", fontsize=15)
+ax.set_ylabel(r"Nucleation Rate, $J$  [#/m³/s]", fontsize=15)
+ax.tick_params(axis='both', labelsize=13)
+ax.grid(False)
+
+plt.tight_layout()
+plt.show()
+
+# =============================================================================
+# CONDENSATION RATE vs TIME
+# =============================================================================
+
+fig, ax = plt.subplots(figsize=(8, 5))
+ax.plot(time_ms, condensation_rate_history, linewidth=1.5)
+ax.set_xlabel("Time (ms)", fontsize=15)
+ax.set_ylabel(r"Condensation Rate  [kg/s]", fontsize=15)
+ax.tick_params(axis='both', labelsize=13)
+ax.grid(False)
+plt.tight_layout()
+plt.show()
+
+# =============================================================================
+# COMBINED RATE PLOT (dual-axis, optional overview)
+# =============================================================================
+
+fig, ax1 = plt.subplots(figsize=(9, 5))
+
+color_nuc  = 'steelblue'
+color_cond = 'darkorange'
+
+ax1.set_xlabel("Time (ms)", fontsize=12)
+ax1.set_ylabel(r"Nucleation Rate  [#/m³/s]", color=color_nuc, fontsize=12)
+ax1.plot(time_ms, nucleation_rate_history, color=color_nuc, linewidth=1.5, label='Nucleation')
+ax1.tick_params(axis='y', labelcolor=color_nuc, labelsize=11)
+ax1.tick_params(axis='x', labelsize=11)
+
+ax2 = ax1.twinx()
+ax2.set_ylabel(r"Condensation Rate  [kg/s]", color=color_cond, fontsize=12)
+ax2.plot(time_ms, condensation_rate_history, color=color_cond,
+         linewidth=1.5, linestyle='--', label='Condensation')
+ax2.tick_params(axis='y', labelcolor=color_cond, labelsize=11)
+
+lines1, labels1 = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=11)
+ax1.set_title("Nucleation & Condensation Rates vs. Time", fontsize=13)
+ax1.grid(True, alpha=0.4)
 plt.tight_layout()
 plt.show()
 
 
+# =============================================================================
+# SNAPSHOT SAVING
+# =============================================================================
 
 def save_snapshots():
     """
@@ -635,7 +728,7 @@ def save_snapshots():
     os.makedirs(snapshot_dir)
 
     snapshot_interval_ms = 1
-    y_max = np.max([w.max() for w in dry_history]) / grid.delta_log_d * 1.1
+    y_max = np.max([w.max() for w in wet_history]) / grid.delta_log_d * 1.1
     last_saved_ms = -np.inf
 
     for frame, t in enumerate(time_history):
@@ -675,7 +768,7 @@ def save_snapshots():
         ax.set_ylim(0, y_max)
         ax.set_xlabel('Particle diameter [nm]', fontsize=16)
         ax.set_ylabel('dN/d(log d)  [#]', fontsize=16)
-        ax.tick_params(axis = "both", labelsize = 13)
+        ax.tick_params(axis="both", labelsize=13)
         ax.xaxis.set_major_formatter(ScalarFormatter())
         ax.ticklabel_format(axis='x', style='plain')
         ax.legend()
@@ -733,9 +826,6 @@ plt.figure(figsize=(8,6))
 
 # Scatter (size vs composition)
 plt.scatter(d_all, wtpct_all, s=10, alpha=0.6)
-
-# Optional: size-weighted visualization (better physically)
-# plt.scatter(d_all, wtpct_all, s=weights_all / weights_all.max() * 50, alpha=0.6)
 
 plt.xscale('log')
 plt.xlabel('Particle diameter [nm]', fontsize=12)
