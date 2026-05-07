@@ -27,7 +27,7 @@ d_min = 1           # minimum diameter plotted (nm)
 d_max = 4000        # maximum diameter plotted (nm)
 N_bins = 150         # number of bins to create
 dt = 0.000001           # length of one time step in simulation (s)
-total_time = 0.5   # total simulation time (s)
+total_time = 0.01   # total simulation time (s)
 plot_interval_seconds = 0.00001       # interval to plot (time length between screenshots plotted)
 plot_interval = int(plot_interval_seconds / dt) # plot interval in terms of time steps
 init_total_num = 5.63e7    # total number of particles initially
@@ -760,7 +760,7 @@ def update(frame):
     ax.ticklabel_format(axis='x', style='plain')
     ax.legend()
     t_ms = time_history[frame] * 1000
-    ax.set_title(f"Simulated Drying — Cohort Tracking  (t = {t_ms:.2f} ms)")
+    ax.set_title(f"Simulated Drying (t = {t_ms:.2f} ms)")
 
 ani = FuncAnimation(fig, update, frames=len(wet_history), interval=150, blit=False) # type: ignore
 plt.show()
