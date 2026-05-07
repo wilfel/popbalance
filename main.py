@@ -336,6 +336,24 @@ class DryingModel:
     and condensational growth of existing dry cohorts. All processes are advanced together
     through the 'advance' method.
     
+    Attributes:
+        None
+        
+    Methods:
+        evaporate_water(wet_pop):
+            Compute per-bin water evaporation rate (kg/s)
+        wet_SA_massloss(wet_pop, gas):
+            Compute per-bin SA condensation/evaporation rate (kg/s)
+        condensation(cohort_pop, gas, dt):
+            Grow all dry cohorts via SA condensation
+        nucleation(cohort_pop, gas, t):
+            Evaluate CNT nucleation rate
+        wet_to_dry(wet_pop, cohort_pop, t):
+            Identify bins that have lost all water or reached SA saturation, transfer
+            them into new dry cohorts, and zero them out in wet_pop.
+        advance(wet_pop, cohort_pop, gas, dt, t):
+            Apply all processes in sequence for one timestep
+    
     """
     def __init__(self):
             pass
@@ -672,10 +690,7 @@ class DryingModel:
         # --- Merge near-identical cohorts to keep list length manageable ---
         dry_pop.merge_similar_cohorts(tol=0.02)
 
-# =============================================================================
-# SETUP
-# =============================================================================
-
+# --- Create all objects ---
 grid            = SizeGrid(d_min, d_max, N_bins, dt, total_time)
 N_dens_init     = grid.init_lognormal(init_total_num, init_mean, init_sd)
 wet_pop         = WetPopulation(grid, N_dens_init)
@@ -683,71 +698,40 @@ dry_pop         = DryPopulation()
 gas             = GasPhase()
 drying          = DryingModel()
 
-# =============================================================================
-# TIME LOOP
-# =============================================================================
-
+# --- Time loop ---
+# Initialize lists to store values over time
 wet_history     = []
-dry_history     = []    # stored as projected N_dist arrays for plotting
+dry_history     = []    
 gas_history     = []
 relative_gas_history = []
 time_history    = []
 dist_history    = []
 
-for step in range(grid.n_steps):
-    t = step * dt
-    drying.advance(wet_pop, dry_pop, gas, dt, t)
+for step in range(grid.n_steps):    # iterate over timesteps
+    t = step * dt    
+    drying.advance(wet_pop, dry_pop, gas, dt, t)    # advance each time step
 
-    if step % plot_interval == 0:
-        wet_history.append(wet_pop.N_dist.copy())
-        dry_history.append(dry_pop.project_to_grid(grid))
+    if step % plot_interval == 0:   # if this timestep is one that's plotted based on plot_interval
         T = 298.15      # K
         R = 8.314   # J/molK
         M_sa = 0.11809 # kg/mol
         p_sat_SA = 1.95E-3      # Pa
+        
+        # Save all relevant values
+        wet_history.append(wet_pop.N_dist.copy())
+        dry_history.append(dry_pop.project_to_grid(grid))
         gas_history.append(gas.conc_SA_gas * R * T/M_sa)
         relative_gas_history.append((gas.conc_SA_gas * R * T/M_sa)/p_sat_SA)
-        #         #C_sat_kgm3    = p_sat_SA    * M_sa / (R * T)
         time_history.append(t)
         dist_history.append(wet_pop.d_dist.copy())
 
         n_cohorts = len(dry_pop.cohorts)
         
-        all_d_sorted = sorted([c.d * 1e9 for c in dry_pop.cohorts])
-        if len(all_d_sorted) > 1:
-            gaps = [(all_d_sorted[i+1] - all_d_sorted[i]) / all_d_sorted[i] 
-                    for i in range(len(all_d_sorted)-1)]
-            idx = int(np.argmax(gaps))
-            print(f"t={t*1000:.2f} ms")
+        all_d_sorted = sorted([c.d * 1e9 for c in dry_pop.cohorts]) # sort all cohorts each timestep
+        print(f"t={t*1000:.2f} ms") # print timestep
 
-
-# =============================================================================
-# SUMMARY STATS
-# =============================================================================
-
-all_d   = np.array([c.d for c in dry_pop.cohorts]) * 1e9    # nm
-all_N   = np.array([c.N for c in dry_pop.cohorts])
-
-if all_N.sum() > 0:
-    cumN    = np.cumsum(all_N[np.argsort(all_d)])
-    d_sort  = np.sort(all_d)
-    d_dry_cmd = d_sort[np.searchsorted(cumN, cumN[-1] * 0.5)]
-else:
-    d_dry_cmd = 0.0
-
-d_wet_cmd = wet_pop.d_dist[np.searchsorted(
-    np.cumsum(wet_pop.N_dist), np.sum(wet_pop.N_dist) * 0.50)] * 1e9
-
-print(f"\nWet CMD : {d_wet_cmd:.1f} nm")
-print(f"Dry CMD : {d_dry_cmd:.1f} nm")
-if d_wet_cmd > 0:
-    sf = d_dry_cmd / d_wet_cmd
-    print(f"Shrinkage factor : {sf:.4f}")
-    print(f"Solute vol frac  : {sf**3:.5f}")
-
-# =============================================================================
-# ANIMATION
-# =============================================================================
+# --- Animation ---
+# EVERYTHING BEYOND THIS POINT IS JUST GRAPHS AND CAN BASICALLY BE IGNORED IN TERMS OF THE MODEL
 
 fig, ax = plt.subplots()
 
@@ -778,12 +762,10 @@ def update(frame):
     t_ms = time_history[frame] * 1000
     ax.set_title(f"Simulated Drying — Cohort Tracking  (t = {t_ms:.2f} ms)")
 
-ani = FuncAnimation(fig, update, frames=len(wet_history), interval=150, blit=False)
+ani = FuncAnimation(fig, update, frames=len(wet_history), interval=150, blit=False) # type: ignore
 plt.show()
 
-# =============================================================================
-# GAS CONCENTRATION PLOT
-# =============================================================================
+# --- Gas concentration plot ---
 
 plt.figure()
 plt.plot(time_history, relative_gas_history)
@@ -794,8 +776,6 @@ plt.yticks(fontsize = 11)
 plt.grid(True)
 plt.tight_layout()
 plt.show()
-
-
 
 def save_snapshots():
     """
@@ -864,11 +844,9 @@ def save_snapshots():
 
 save_snapshots()
 
-# =============================================================================
-# FINAL COMPOSITION vs SIZE PLOT (wt.% SA vs diameter)
-# =============================================================================
+# --- Final Composition plot --- 
 
-# --- Collect dry cohort data ---
+# Collect dry cohort data
 d_dry = []
 wtpct_SA_dry = []
 weights_dry = []
@@ -897,10 +875,6 @@ weights_wet = wet_pop.N_dist[mask]
 d_all = np.concatenate([d_dry, d_wet])
 wtpct_all = np.concatenate([wtpct_SA_dry, wtpct_SA_wet])
 weights_all = np.concatenate([weights_dry, weights_wet])
-
-# =============================================================================
-# PLOT
-# =============================================================================
 
 plt.figure(figsize=(8,6))
 
